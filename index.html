@@ -798,6 +798,7 @@
       ready: false,
       busy: false,
       activeTool: null,
+      cancelCurrent: null,
     };
 
     const concatState = {
@@ -953,37 +954,77 @@
       };
     }
 
-    function isUgoiraMemoryError(error) {
-      return /memory access out of bounds/i.test(String(error?.message || error));
+    function makeAbortError() {
+      const error = new Error("AbortError");
+      error.name = "AbortError";
+      return error;
     }
 
-    async function resetFFmpegInstanceForRetry(tool) {
-      if (ffmpegState.instance) {
+    function throwIfAborted(signal) {
+      if (signal?.aborted) {
+        throw makeAbortError();
+      }
+    }
+
+    async function waitForVideoReady(video) {
+      if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) return;
+      await new Promise((resolve, reject) => {
+        const cleanup = () => {
+          video.removeEventListener("loadeddata", onLoaded);
+          video.removeEventListener("error", onError);
+        };
+        const onLoaded = () => {
+          cleanup();
+          resolve();
+        };
+        const onError = () => {
+          cleanup();
+          reject(new Error("動画データの読み込みに失敗しました。"));
+        };
+        video.addEventListener("loadeddata", onLoaded, { once: true });
+        video.addEventListener("error", onError, { once: true });
+      });
+    }
+
+    async function seekVideo(video, time, signal) {
+      throwIfAborted(signal);
+      if (Math.abs(video.currentTime - time) < 0.001) return;
+      await new Promise((resolve, reject) => {
+        const cleanup = () => {
+          video.removeEventListener("seeked", onSeeked);
+          video.removeEventListener("error", onError);
+        };
+        const onSeeked = () => {
+          cleanup();
+          resolve();
+        };
+        const onError = () => {
+          cleanup();
+          reject(new Error("動画シークに失敗しました。"));
+        };
+        video.addEventListener("seeked", onSeeked, { once: true });
+        video.addEventListener("error", onError, { once: true });
         try {
-          ffmpegState.instance.terminate();
-        } catch (_) {
+          video.currentTime = time;
+        } catch (error) {
+          cleanup();
+          reject(error);
         }
-      }
-      ffmpegState.instance = null;
-      ffmpegState.ready = false;
-      ffmpegState.loading = null;
-      ffmpegState.activeTool = tool;
-      return ensureFFmpeg(tool);
+      });
+      throwIfAborted(signal);
     }
 
-    async function listUgoiraFrames(ffmpeg) {
-      const files = await ffmpeg.listDir(".");
-      return files
-        .filter((entry) => /^frame_\d{5}\.jpg$/.test(entry.name))
-        .sort((a, b) => a.name.localeCompare(b.name));
-    }
-
-    async function removeUgoiraFrames(ffmpeg) {
-      try {
-        const frames = await listUgoiraFrames(ffmpeg);
-        await removeFiles(ffmpeg, frames.map((frame) => frame.name));
-      } catch (_) {
-      }
+    async function canvasToJpegBytes(canvas, quality = 0.92) {
+      const blob = await new Promise((resolve, reject) => {
+        canvas.toBlob((result) => {
+          if (result) {
+            resolve(result);
+          } else {
+            reject(new Error("JPG 変換に失敗しました。"));
+          }
+        }, "image/jpeg", quality);
+      });
+      return new Uint8Array(await blob.arrayBuffer());
     }
 
     function uniqueConcatLabel(name) {
@@ -1000,6 +1041,46 @@
         const current = concatState.nameCounts.get(item.originalName) || 0;
         concatState.nameCounts.set(item.originalName, current + 1);
       });
+    }
+
+    async function deleteDirIfExists(ffmpeg, path) {
+      try {
+        await ffmpeg.deleteDir(path);
+      } catch (_) {
+      }
+    }
+
+    async function prepareConcatInputs(ffmpeg) {
+      const mountPoint = `concat_inputs_${crypto.randomUUID()}`;
+      const mountedFiles = [];
+      const listLines = [];
+
+      for (let i = 0; i < concatState.items.length; i += 1) {
+        const item = concatState.items[i];
+        const ext = splitName(item.file.name).ext || ".mp4";
+        const inputName = `concat_input_${String(i + 1).padStart(3, "0")}${ext}`;
+        mountedFiles.push(new File([item.file], inputName, {
+          type: item.file.type || "application/octet-stream",
+          lastModified: item.file.lastModified || Date.now(),
+        }));
+        listLines.push(`file '${mountPoint}/${inputName}'`);
+        appendLog(concatEls.log, `入力追加: ${item.label}`);
+      }
+
+      appendLog(concatEls.log, "入力動画を WORKERFS としてマウントします。");
+      await ffmpeg.createDir(mountPoint);
+      await ffmpeg.mount("WORKERFS", { files: mountedFiles }, mountPoint);
+
+      return {
+        listLines,
+        async cleanup() {
+          try {
+            await ffmpeg.unmount(mountPoint);
+          } catch (_) {
+          }
+          await deleteDirIfExists(ffmpeg, mountPoint);
+        },
+      };
     }
 
     function downloadBlob(blobLike, fileName, logElement = null) {
@@ -1146,12 +1227,21 @@
       ffmpegState.loading = null;
       ffmpegState.busy = false;
       ffmpegState.activeTool = null;
+      ffmpegState.cancelCurrent = null;
     }
 
     function cancelCurrentTask(message) {
-      if (!ffmpegState.busy || !ffmpegState.instance) return;
+      if (!ffmpegState.busy) return;
       routeLog(message);
-      ffmpegState.instance.terminate();
+      if (ffmpegState.cancelCurrent) {
+        try {
+          ffmpegState.cancelCurrent();
+        } catch (_) {
+        }
+      }
+      if (ffmpegState.instance) {
+        ffmpegState.instance.terminate();
+      }
       resetFFmpegState();
       disableButtons(true, concatEls.cancel, ugoiraEls.cancel);
       disableButtons(false, concatEls.run, ugoiraEls.run);
@@ -1167,6 +1257,7 @@
       }
       ffmpegState.busy = true;
       ffmpegState.activeTool = tool;
+      ffmpegState.cancelCurrent = null;
       if (tool === "concat") {
         disableButtons(true, concatEls.run);
         disableButtons(false, concatEls.cancel);
@@ -1198,6 +1289,40 @@
           disableButtons(true, ugoiraEls.cancel);
         }
         ffmpegState.activeTool = null;
+        ffmpegState.cancelCurrent = null;
+      }
+    }
+
+    async function withCancelableTask(tool, runner) {
+      if (ffmpegState.busy) {
+        throw new Error("別の動画処理が進行中です。完了またはキャンセル後に再実行してください。");
+      }
+      const controller = new AbortController();
+      ffmpegState.busy = true;
+      ffmpegState.activeTool = tool;
+      ffmpegState.cancelCurrent = () => controller.abort();
+      if (tool === "ugoira") {
+        disableButtons(true, ugoiraEls.run);
+        disableButtons(false, ugoiraEls.cancel);
+        setProgress(ugoiraEls.progress, 0);
+      }
+      try {
+        const result = await runner(controller.signal);
+        routeProgress(1);
+        return result;
+      } catch (error) {
+        if (!/terminated|abort/i.test(String(error?.message || error))) {
+          routeLog(`エラー: ${error.message || error}`);
+        }
+        throw error;
+      } finally {
+        ffmpegState.busy = false;
+        if (tool === "ugoira") {
+          disableButtons(false, ugoiraEls.run);
+          disableButtons(true, ugoiraEls.cancel);
+        }
+        ffmpegState.activeTool = null;
+        ffmpegState.cancelCurrent = null;
       }
     }
 
@@ -1298,18 +1423,10 @@
       try {
         await withFFmpegTask("concat", async (ffmpeg) => {
           const createdFiles = [];
+          let preparedInputs = null;
           try {
-            const listLines = [];
-            for (let i = 0; i < concatState.items.length; i += 1) {
-              const item = concatState.items[i];
-              const ext = splitName(item.file.name).ext || ".mp4";
-              const inputName = `concat_input_${String(i + 1).padStart(3, "0")}${ext}`;
-              await ffmpeg.writeFile(inputName, await ffmpegModules.fetchFile(item.file));
-              createdFiles.push(inputName);
-              listLines.push(`file '${inputName}'`);
-              appendLog(concatEls.log, `入力追加: ${item.label}`);
-            }
-            await ffmpeg.writeFile("concat_list.txt", listLines.join("\n"));
+            preparedInputs = await prepareConcatInputs(ffmpeg);
+            await ffmpeg.writeFile("concat_list.txt", preparedInputs.listLines.join("\n"));
             createdFiles.push("concat_list.txt");
             const firstExt = splitName(concatState.items[0].file.name).ext || ".mp4";
             const outputName = `${sanitizeBaseName(concatState.items[0].file.name)}-concat${firstExt}`;
@@ -1326,14 +1443,16 @@
             }
             const data = await ffmpeg.readFile(outputName);
             const mimeType = concatState.items[0].file.type || "video/mp4";
-            const outputBytes = data instanceof Uint8Array ? data.slice(0) : data;
-            const outputBlob = new Blob([outputBytes], { type: mimeType });
+            const outputBlob = new Blob([data], { type: mimeType });
             appendLog(concatEls.log, `ffmpeg 出力サイズ: ${formatBytes(outputBlob.size)}`);
             downloadBlob(outputBlob, outputName, concatEls.log);
             setStatus(concatEls.status, `連結が完了しました。${outputName} をダウンロードしました。`, "success");
             appendLog(concatEls.log, `出力完了: ${outputName}`);
           } finally {
             await removeFiles(ffmpeg, createdFiles);
+            if (preparedInputs) {
+              await preparedInputs.cleanup();
+            }
           }
         });
       } catch (error) {
@@ -1444,113 +1563,79 @@
       }
 
       appendLog(ugoiraEls.log, "うごイラ書き出しを開始します。");
-      setStatus(ugoiraEls.status, "JPG 連番を生成しています。完了後に zip を保存します。", "default");
+      setStatus(ugoiraEls.status, "動画を 1 枚ずつ JPG 化しています。完了後に zip を保存します。", "default");
 
       try {
-        await withFFmpegTask("ugoira", async (ffmpeg) => {
-          let createdFiles = [];
-          try {
-            const inputExt = splitName(ugoiraState.file.name).ext || ".mp4";
-            const inputName = `ugoira_source${inputExt}`;
-            const expectedFrames = Math.max(1, Math.floor(span * fps));
-            const inputBytes = await ffmpegModules.fetchFile(ugoiraState.file);
-            let currentFFmpeg = ffmpeg;
-            let budgetScale = 1;
-            let attempt = 1;
-            let safeSize = getUgoiraSafeSize(ugoiraState.metadata, expectedFrames, budgetScale);
-            let frames = [];
-
-            while (true) {
-              createdFiles = [inputName];
-              const filters = [`fps=${fps}`];
-              if (safeSize.downscaled) {
-                filters.push(`scale=${safeSize.width}:${safeSize.height}:flags=lanczos`);
-              }
-              appendLog(
-                ugoiraEls.log,
-                `うごイラ変換 ${attempt} 回目: ${safeSize.width}×${safeSize.height} / 想定 ${expectedFrames} 枚`
-              );
-              if (safeSize.downscaled) {
-                appendLog(
-                  ugoiraEls.log,
-                  `ブラウザメモリ節約のため ${ugoiraState.metadata.width}×${ugoiraState.metadata.height} → ${safeSize.width}×${safeSize.height} に縮小します。`
-                );
-              }
-              await currentFFmpeg.writeFile(inputName, inputBytes);
-              try {
-                const exitCode = await currentFFmpeg.exec([
-                  "-ss", String(start),
-                  "-t", String(span),
-                  "-i", inputName,
-                  "-vf", filters.join(","),
-                  "-q:v", "2",
-                  "frame_%05d.jpg",
-                ]);
-                if (exitCode !== 0) {
-                  throw new Error("JPG 連番の生成に失敗しました。");
-                }
-                frames = await listUgoiraFrames(currentFFmpeg);
-                break;
-              } catch (error) {
-                if (!isUgoiraMemoryError(error)) {
-                  throw error;
-                }
-                appendLog(
-                  ugoiraEls.log,
-                  `メモリ上限に達したため ${safeSize.width}×${safeSize.height} で失敗しました。1 枚あたりの px 数を 70% に落として再試行します。`
-                );
-                await removeUgoiraFrames(currentFFmpeg);
-                try {
-                  await currentFFmpeg.deleteFile(inputName);
-                } catch (_) {
-                }
-                const nextBudgetScale = budgetScale * 0.7;
-                const nextSafeSize = getUgoiraSafeSize(ugoiraState.metadata, expectedFrames, nextBudgetScale);
-                if (
-                  nextSafeSize.width < 64 ||
-                  nextSafeSize.height < 64 ||
-                  (nextSafeSize.width === safeSize.width && nextSafeSize.height === safeSize.height)
-                ) {
-                  throw new Error("ブラウザのメモリ上限に達しました。これ以上の自動縮小では実用サイズを維持できません。範囲または FPS を下げてください。");
-                }
-                budgetScale = nextBudgetScale;
-                safeSize = nextSafeSize;
-                attempt += 1;
-                currentFFmpeg = await resetFFmpegInstanceForRetry("ugoira");
-              }
-            }
-            if (frames.length === 0) {
-              throw new Error("出力フレームが見つかりませんでした。");
-            }
-            appendLog(ugoiraEls.log, `${frames.length} 枚の JPG を zip にまとめます。`);
-            const zip = new JSZip();
-            for (const frame of frames) {
-              const data = await currentFFmpeg.readFile(frame.name);
-              const frameBytes = data instanceof Uint8Array ? data.slice(0) : data;
-              zip.file(frame.name, frameBytes, { binary: true });
-              createdFiles.push(frame.name);
-            }
-            const zipBlob = await zip.generateAsync({
-              type: "blob",
-              compression: "STORE",
-              streamFiles: true,
-            });
-            const outputName = `${sanitizeBaseName(ugoiraState.file.name)}-${fps}fps.zip`;
-            appendLog(ugoiraEls.log, `zip 出力サイズ: ${formatBytes(zipBlob.size)}`);
-            downloadBlob(zipBlob, outputName, ugoiraEls.log);
-            setStatus(ugoiraEls.status, `${frames.length} 枚を書き出し、${outputName} をダウンロードしました。`, "success");
-            appendLog(ugoiraEls.log, `zip 出力完了: ${outputName}`);
-          } finally {
-            const cleanupFFmpeg = ffmpegState.instance || ffmpeg;
-            await removeFiles(cleanupFFmpeg, createdFiles);
+        await withCancelableTask("ugoira", async (signal) => {
+          const expectedFrames = Math.max(1, Math.floor(span * fps));
+          const safeSize = getUgoiraSafeSize(ugoiraState.metadata, expectedFrames);
+          if (safeSize.downscaled) {
+            appendLog(
+              ugoiraEls.log,
+              `ブラウザ負荷を抑えるため ${ugoiraState.metadata.width}×${ugoiraState.metadata.height} → ${safeSize.width}×${safeSize.height} に縮小します。`
+            );
           }
+          appendLog(
+            ugoiraEls.log,
+            `うごイラ変換: ${safeSize.width}×${safeSize.height} / 想定 ${expectedFrames} 枚`
+          );
+
+          const extractor = document.createElement("video");
+          extractor.preload = "auto";
+          extractor.muted = true;
+          extractor.playsInline = true;
+          extractor.src = ugoiraState.objectUrl;
+          await waitForVideoReady(extractor);
+          throwIfAborted(signal);
+
+          const canvas = document.createElement("canvas");
+          canvas.width = safeSize.width;
+          canvas.height = safeSize.height;
+          const context = canvas.getContext("2d", { alpha: false });
+          if (!context) {
+            throw new Error("Canvas の初期化に失敗しました。");
+          }
+          context.imageSmoothingEnabled = true;
+          context.imageSmoothingQuality = "high";
+
+          const zip = new JSZip();
+          const frameTimes = [];
+          for (let i = 0; ; i += 1) {
+            const time = start + i / fps;
+            if (time >= end || time > ugoiraState.metadata.duration) break;
+            frameTimes.push(time);
+          }
+          if (frameTimes.length === 0) {
+            frameTimes.push(start);
+          }
+
+          for (let i = 0; i < frameTimes.length; i += 1) {
+            throwIfAborted(signal);
+            const time = Math.min(frameTimes[i], Math.max(0, ugoiraState.metadata.duration - 0.001));
+            await seekVideo(extractor, time, signal);
+            context.drawImage(extractor, 0, 0, safeSize.width, safeSize.height);
+            const jpgBytes = await canvasToJpegBytes(canvas, 0.92);
+            const frameName = `frame_${String(i + 1).padStart(5, "0")}.jpg`;
+            zip.file(frameName, jpgBytes, { binary: true });
+            appendLog(ugoiraEls.log, `フレーム ${i + 1}/${frameTimes.length}: ${frameName}`);
+            setProgress(ugoiraEls.progress, (i + 1) / frameTimes.length);
+          }
+
+          appendLog(ugoiraEls.log, `${frameTimes.length} 枚の JPG を zip にまとめます。`);
+          const zipBlob = await zip.generateAsync({
+            type: "blob",
+            compression: "STORE",
+            streamFiles: true,
+          });
+          const outputName = `${sanitizeBaseName(ugoiraState.file.name)}-${fps}fps.zip`;
+          appendLog(ugoiraEls.log, `zip 出力サイズ: ${formatBytes(zipBlob.size)}`);
+          downloadBlob(zipBlob, outputName, ugoiraEls.log);
+          setStatus(ugoiraEls.status, `${frameTimes.length} 枚を書き出し、${outputName} をダウンロードしました。`, "success");
+          appendLog(ugoiraEls.log, `zip 出力完了: ${outputName}`);
         });
       } catch (error) {
         if (/terminated|abort/i.test(String(error?.message || ""))) return;
         const message = String(error?.message || error);
-        if (isUgoiraMemoryError(message)) {
-          appendLog(ugoiraEls.log, "高解像度またはフレーム数過多でブラウザメモリ上限に達しました。範囲を短くするか FPS を下げて再試行してください。");
-        }
         setStatus(ugoiraEls.status, `うごイラ書き出しに失敗しました。${message}`, "error");
       }
     });
@@ -1589,30 +1674,35 @@
       pixivCtx.drawImage(image, 0, 0, displayWidth, displayHeight);
       if (!crop) return;
 
+      const cropAccent = "#ffe45c";
+
       pixivCtx.save();
-      pixivCtx.fillStyle = "rgba(18, 20, 25, 0.42)";
-      pixivCtx.fillRect(0, 0, displayWidth, displayHeight);
-      pixivCtx.clearRect(crop.x, crop.y, crop.size, crop.size);
+      pixivCtx.strokeStyle = cropAccent;
+      pixivCtx.lineWidth = 3;
+      pixivCtx.shadowColor = "rgba(18, 20, 25, 0.9)";
+      pixivCtx.shadowBlur = 12;
+      pixivCtx.strokeRect(crop.x, crop.y, crop.size, crop.size);
       pixivCtx.restore();
 
-      pixivCtx.strokeStyle = "#ffffff";
-      pixivCtx.lineWidth = 2;
-      pixivCtx.strokeRect(crop.x, crop.y, crop.size, crop.size);
-
-      pixivCtx.setLineDash([6, 6]);
-      pixivCtx.strokeStyle = "rgba(255,255,255,0.8)";
+      pixivCtx.save();
+      pixivCtx.setLineDash([8, 6]);
+      pixivCtx.strokeStyle = "rgba(255, 228, 92, 0.78)";
+      pixivCtx.lineWidth = 1.5;
       pixivCtx.beginPath();
       pixivCtx.moveTo(crop.x, crop.y + crop.size / 2);
       pixivCtx.lineTo(crop.x + crop.size, crop.y + crop.size / 2);
       pixivCtx.moveTo(crop.x + crop.size / 2, crop.y);
       pixivCtx.lineTo(crop.x + crop.size / 2, crop.y + crop.size);
       pixivCtx.stroke();
-      pixivCtx.setLineDash([]);
+      pixivCtx.restore();
 
       const handles = getPixivHandles();
-      pixivCtx.fillStyle = "#ffffff";
+      pixivCtx.fillStyle = cropAccent;
+      pixivCtx.strokeStyle = "#1f2631";
+      pixivCtx.lineWidth = 1.5;
       handles.forEach(({ x, y }) => {
         pixivCtx.fillRect(x - 6, y - 6, 12, 12);
+        pixivCtx.strokeRect(x - 6, y - 6, 12, 12);
       });
 
       const scale = pixivState.image.naturalWidth / displayWidth;
