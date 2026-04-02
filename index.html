@@ -916,6 +916,41 @@
       };
     }
 
+    function toEven(value) {
+      const rounded = Math.max(2, Math.round(Number(value) || 0));
+      return rounded % 2 === 0 ? rounded : rounded - 1;
+    }
+
+    function getUgoiraSafeSize(metadata, frameCount) {
+      const width = Number(metadata?.width) || 0;
+      const height = Number(metadata?.height) || 0;
+      if (!width || !height) {
+        return {
+          width,
+          height,
+          downscaled: false,
+          frameCount,
+        };
+      }
+
+      const longestEdgeCap = 1600;
+      const pixelFrameBudget = 72_000_000;
+      const totalPixels = Math.max(1, width * height * Math.max(1, frameCount));
+      const scaleByPixels = Math.min(1, Math.sqrt(pixelFrameBudget / totalPixels));
+      const scaleByEdge = Math.min(1, longestEdgeCap / Math.max(width, height));
+      const scale = Math.min(scaleByPixels, scaleByEdge);
+      const safeWidth = toEven(width * scale);
+      const safeHeight = toEven(height * scale);
+      const downscaled = safeWidth !== width || safeHeight !== height;
+
+      return {
+        width: safeWidth,
+        height: safeHeight,
+        downscaled,
+        frameCount,
+      };
+    }
+
     function uniqueConcatLabel(name) {
       const count = (concatState.nameCounts.get(name) || 0) + 1;
       concatState.nameCounts.set(name, count);
@@ -948,7 +983,7 @@
         link.remove();
         URL.revokeObjectURL(url);
       }, 60_000);
-      }
+    }
 
     function setupDropzone(root, input, onFiles) {
       const activate = () => root.classList.add("dragging");
@@ -1308,9 +1343,13 @@
       const fps = Math.max(1, Math.round(Number(ugoiraEls.fps.value) || 8));
       const span = Math.max(0, end - start);
       const frames = Math.floor(span * fps);
+      const safeSize = getUgoiraSafeSize(ugoiraState.metadata, frames);
+      const resizeNote = safeSize.downscaled
+        ? ` / 出力 ${safeSize.width}×${safeSize.height} に自動縮小`
+        : "";
       setStatus(
         ugoiraEls.status,
-        `${ugoiraState.file.name} / ${ugoiraState.metadata.width}×${ugoiraState.metadata.height} / ${formatSeconds(ugoiraState.metadata.duration)} / 想定 ${frames} 枚`,
+        `${ugoiraState.file.name} / ${ugoiraState.metadata.width}×${ugoiraState.metadata.height} / ${formatSeconds(ugoiraState.metadata.duration)} / 想定 ${frames} 枚${resizeNote}`,
         "default"
       );
     }
@@ -1378,13 +1417,23 @@
           try {
             const inputExt = splitName(ugoiraState.file.name).ext || ".mp4";
             const inputName = `ugoira_source${inputExt}`;
+            const expectedFrames = Math.max(1, Math.floor(span * fps));
+            const safeSize = getUgoiraSafeSize(ugoiraState.metadata, expectedFrames);
+            const filters = [`fps=${fps}`];
+            if (safeSize.downscaled) {
+              filters.push(`scale=${safeSize.width}:${safeSize.height}:flags=lanczos`);
+              appendLog(
+                ugoiraEls.log,
+                `ブラウザメモリ節約のため ${ugoiraState.metadata.width}×${ugoiraState.metadata.height} → ${safeSize.width}×${safeSize.height} に縮小します。`
+              );
+            }
             await ffmpeg.writeFile(inputName, await ffmpegModules.fetchFile(ugoiraState.file));
             createdFiles.push(inputName);
             const exitCode = await ffmpeg.exec([
               "-ss", String(start),
               "-t", String(span),
               "-i", inputName,
-              "-vf", `fps=${fps}`,
+              "-vf", filters.join(","),
               "-q:v", "2",
               "frame_%05d.jpg",
             ]);
@@ -1402,10 +1451,15 @@
             const zip = new JSZip();
             for (const frame of frames) {
               const data = await ffmpeg.readFile(frame.name);
-              zip.file(frame.name, data.buffer.slice(0));
+              const frameBytes = data instanceof Uint8Array ? data.slice(0) : data;
+              zip.file(frame.name, frameBytes, { binary: true });
               createdFiles.push(frame.name);
             }
-            const zipBlob = await zip.generateAsync({ type: "blob" });
+            const zipBlob = await zip.generateAsync({
+              type: "blob",
+              compression: "STORE",
+              streamFiles: true,
+            });
             const outputName = `${sanitizeBaseName(ugoiraState.file.name)}-${fps}fps.zip`;
             appendLog(ugoiraEls.log, `zip 出力サイズ: ${formatBytes(zipBlob.size)}`);
             downloadBlob(zipBlob, outputName, ugoiraEls.log);
@@ -1417,7 +1471,11 @@
         });
       } catch (error) {
         if (/terminated|abort/i.test(String(error?.message || ""))) return;
-        setStatus(ugoiraEls.status, `うごイラ書き出しに失敗しました。${error.message || error}`, "error");
+        const message = String(error?.message || error);
+        if (/memory access out of bounds/i.test(message)) {
+          appendLog(ugoiraEls.log, "高解像度またはフレーム数過多でブラウザメモリ上限に達しました。範囲を短くするか FPS を下げて再試行してください。");
+        }
+        setStatus(ugoiraEls.status, `うごイラ書き出しに失敗しました。${message}`, "error");
       }
     });
 
