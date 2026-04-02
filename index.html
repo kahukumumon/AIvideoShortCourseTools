@@ -921,7 +921,7 @@
       return rounded % 2 === 0 ? rounded : rounded - 1;
     }
 
-    function getUgoiraSafeSize(metadata, frameCount) {
+    function getUgoiraSafeSize(metadata, frameCount, budgetScale = 1) {
       const width = Number(metadata?.width) || 0;
       const height = Number(metadata?.height) || 0;
       if (!width || !height) {
@@ -930,11 +930,12 @@
           height,
           downscaled: false,
           frameCount,
+          budgetScale,
         };
       }
 
       const longestEdgeCap = 1600;
-      const pixelFrameBudget = 72_000_000;
+      const pixelFrameBudget = 72_000_000 * Math.max(0.1, Number(budgetScale) || 1);
       const totalPixels = Math.max(1, width * height * Math.max(1, frameCount));
       const scaleByPixels = Math.min(1, Math.sqrt(pixelFrameBudget / totalPixels));
       const scaleByEdge = Math.min(1, longestEdgeCap / Math.max(width, height));
@@ -948,7 +949,41 @@
         height: safeHeight,
         downscaled,
         frameCount,
+        budgetScale,
       };
+    }
+
+    function isUgoiraMemoryError(error) {
+      return /memory access out of bounds/i.test(String(error?.message || error));
+    }
+
+    async function resetFFmpegInstanceForRetry(tool) {
+      if (ffmpegState.instance) {
+        try {
+          ffmpegState.instance.terminate();
+        } catch (_) {
+        }
+      }
+      ffmpegState.instance = null;
+      ffmpegState.ready = false;
+      ffmpegState.loading = null;
+      ffmpegState.activeTool = tool;
+      return ensureFFmpeg(tool);
+    }
+
+    async function listUgoiraFrames(ffmpeg) {
+      const files = await ffmpeg.listDir(".");
+      return files
+        .filter((entry) => /^frame_\d{5}\.jpg$/.test(entry.name))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    }
+
+    async function removeUgoiraFrames(ffmpeg) {
+      try {
+        const frames = await listUgoiraFrames(ffmpeg);
+        await removeFiles(ffmpeg, frames.map((frame) => frame.name));
+      } catch (_) {
+      }
     }
 
     function uniqueConcatLabel(name) {
@@ -1413,44 +1448,84 @@
 
       try {
         await withFFmpegTask("ugoira", async (ffmpeg) => {
-          const createdFiles = [];
+          let createdFiles = [];
           try {
             const inputExt = splitName(ugoiraState.file.name).ext || ".mp4";
             const inputName = `ugoira_source${inputExt}`;
             const expectedFrames = Math.max(1, Math.floor(span * fps));
-            const safeSize = getUgoiraSafeSize(ugoiraState.metadata, expectedFrames);
-            const filters = [`fps=${fps}`];
-            if (safeSize.downscaled) {
-              filters.push(`scale=${safeSize.width}:${safeSize.height}:flags=lanczos`);
+            const inputBytes = await ffmpegModules.fetchFile(ugoiraState.file);
+            let currentFFmpeg = ffmpeg;
+            let budgetScale = 1;
+            let attempt = 1;
+            let safeSize = getUgoiraSafeSize(ugoiraState.metadata, expectedFrames, budgetScale);
+            let frames = [];
+
+            while (true) {
+              createdFiles = [inputName];
+              const filters = [`fps=${fps}`];
+              if (safeSize.downscaled) {
+                filters.push(`scale=${safeSize.width}:${safeSize.height}:flags=lanczos`);
+              }
               appendLog(
                 ugoiraEls.log,
-                `ブラウザメモリ節約のため ${ugoiraState.metadata.width}×${ugoiraState.metadata.height} → ${safeSize.width}×${safeSize.height} に縮小します。`
+                `うごイラ変換 ${attempt} 回目: ${safeSize.width}×${safeSize.height} / 想定 ${expectedFrames} 枚`
               );
+              if (safeSize.downscaled) {
+                appendLog(
+                  ugoiraEls.log,
+                  `ブラウザメモリ節約のため ${ugoiraState.metadata.width}×${ugoiraState.metadata.height} → ${safeSize.width}×${safeSize.height} に縮小します。`
+                );
+              }
+              await currentFFmpeg.writeFile(inputName, inputBytes);
+              try {
+                const exitCode = await currentFFmpeg.exec([
+                  "-ss", String(start),
+                  "-t", String(span),
+                  "-i", inputName,
+                  "-vf", filters.join(","),
+                  "-q:v", "2",
+                  "frame_%05d.jpg",
+                ]);
+                if (exitCode !== 0) {
+                  throw new Error("JPG 連番の生成に失敗しました。");
+                }
+                frames = await listUgoiraFrames(currentFFmpeg);
+                break;
+              } catch (error) {
+                if (!isUgoiraMemoryError(error)) {
+                  throw error;
+                }
+                appendLog(
+                  ugoiraEls.log,
+                  `メモリ上限に達したため ${safeSize.width}×${safeSize.height} で失敗しました。1 枚あたりの px 数を 70% に落として再試行します。`
+                );
+                await removeUgoiraFrames(currentFFmpeg);
+                try {
+                  await currentFFmpeg.deleteFile(inputName);
+                } catch (_) {
+                }
+                const nextBudgetScale = budgetScale * 0.7;
+                const nextSafeSize = getUgoiraSafeSize(ugoiraState.metadata, expectedFrames, nextBudgetScale);
+                if (
+                  nextSafeSize.width < 64 ||
+                  nextSafeSize.height < 64 ||
+                  (nextSafeSize.width === safeSize.width && nextSafeSize.height === safeSize.height)
+                ) {
+                  throw new Error("ブラウザのメモリ上限に達しました。これ以上の自動縮小では実用サイズを維持できません。範囲または FPS を下げてください。");
+                }
+                budgetScale = nextBudgetScale;
+                safeSize = nextSafeSize;
+                attempt += 1;
+                currentFFmpeg = await resetFFmpegInstanceForRetry("ugoira");
+              }
             }
-            await ffmpeg.writeFile(inputName, await ffmpegModules.fetchFile(ugoiraState.file));
-            createdFiles.push(inputName);
-            const exitCode = await ffmpeg.exec([
-              "-ss", String(start),
-              "-t", String(span),
-              "-i", inputName,
-              "-vf", filters.join(","),
-              "-q:v", "2",
-              "frame_%05d.jpg",
-            ]);
-            if (exitCode !== 0) {
-              throw new Error("JPG 連番の生成に失敗しました。");
-            }
-            const files = await ffmpeg.listDir(".");
-            const frames = files
-              .filter((entry) => /^frame_\d{5}\.jpg$/.test(entry.name))
-              .sort((a, b) => a.name.localeCompare(b.name));
             if (frames.length === 0) {
               throw new Error("出力フレームが見つかりませんでした。");
             }
             appendLog(ugoiraEls.log, `${frames.length} 枚の JPG を zip にまとめます。`);
             const zip = new JSZip();
             for (const frame of frames) {
-              const data = await ffmpeg.readFile(frame.name);
+              const data = await currentFFmpeg.readFile(frame.name);
               const frameBytes = data instanceof Uint8Array ? data.slice(0) : data;
               zip.file(frame.name, frameBytes, { binary: true });
               createdFiles.push(frame.name);
@@ -1466,13 +1541,14 @@
             setStatus(ugoiraEls.status, `${frames.length} 枚を書き出し、${outputName} をダウンロードしました。`, "success");
             appendLog(ugoiraEls.log, `zip 出力完了: ${outputName}`);
           } finally {
-            await removeFiles(ffmpeg, createdFiles);
+            const cleanupFFmpeg = ffmpegState.instance || ffmpeg;
+            await removeFiles(cleanupFFmpeg, createdFiles);
           }
         });
       } catch (error) {
         if (/terminated|abort/i.test(String(error?.message || ""))) return;
         const message = String(error?.message || error);
-        if (/memory access out of bounds/i.test(message)) {
+        if (isUgoiraMemoryError(message)) {
           appendLog(ugoiraEls.log, "高解像度またはフレーム数過多でブラウザメモリ上限に達しました。範囲を短くするか FPS を下げて再試行してください。");
         }
         setStatus(ugoiraEls.status, `うごイラ書き出しに失敗しました。${message}`, "error");
