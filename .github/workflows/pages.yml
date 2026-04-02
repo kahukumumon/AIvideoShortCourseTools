@@ -23,13 +23,17 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Pages
-        uses: actions/configure-pages@v5
+        id: pages
+        uses: actions/configure-pages@v6
+        with:
+          token: ${{ secrets.PAGES_PAT != '' && secrets.PAGES_PAT || github.token }}
+          enablement: ${{ secrets.PAGES_PAT != '' }}
 
       - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v4
         with:
           path: .
 
