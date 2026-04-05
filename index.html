@@ -348,7 +348,9 @@
     }
 
     input[type="number"],
-    input[type="text"] {
+    input[type="text"],
+    select,
+    textarea {
       width: 100%;
       padding: 10px 12px;
       border-radius: 12px;
@@ -356,6 +358,53 @@
       background: rgba(255, 255, 255, 0.84);
       font: inherit;
       color: var(--ink);
+    }
+
+    textarea {
+      min-height: 188px;
+      resize: vertical;
+      line-height: 1.7;
+    }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .field-span {
+      grid-column: 1 / -1;
+    }
+
+    .checkline {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 44px;
+      padding: 10px 12px;
+      border-radius: 12px;
+      border: 1px solid rgba(86, 65, 43, 0.15);
+      background: rgba(255, 255, 255, 0.84);
+      color: var(--ink);
+    }
+
+    .checkline input {
+      width: 18px;
+      height: 18px;
+      margin: 0;
+      accent-color: var(--brand);
+    }
+
+    .prompt-output {
+      display: grid;
+      gap: 12px;
+    }
+
+    .output-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 6px;
     }
 
     button {
@@ -582,6 +631,10 @@
         padding: 16px;
         border-radius: 18px;
       }
+
+      .form-grid {
+        grid-template-columns: 1fr;
+      }
     }
   </style>
 </head>
@@ -592,39 +645,15 @@
       <a href="#concat">動画連結</a>
       <a href="#ugoira">うごイラ</a>
       <a href="#pixiv">pixivリサイズ</a>
+      <a href="#character">オリキャラ設定</a>
     </nav>
 
     <section class="hero" id="home">
       <span class="eyebrow">AI動画短期講座ツール</span>
-      <h1>ブラウザだけで使える、制作補助ツール集。</h1>
+      <h1>ブラウザだけで使える<br>制作補助ツール集</h1>
       <p>
-        要件に合わせて、1枚の HTML に 3 つのツールをまとめました。動画処理はブラウザ内で
-        <code>ffmpeg.wasm</code> を使って実行し、画像の切り出しは Canvas で完結します。
-      </p>
-      <div class="warning" id="protocolWarning" hidden>
-        `file://` 直開きだとブラウザによっては WebWorker / WASM 読み込みが制限されます。動かない場合は
-        ローカル HTTP サーバー経由で開いてください。
-      </div>
+       一番上に目次があります。使いたい機能に移動する時に使用してください。</p>
     </section>
-
-    <section class="cards">
-      <a class="card" href="#concat">
-        <span class="card-tag">01 / JOIN</span>
-        <h2>動画連結</h2>
-        <p>複数動画を追加して順番を調整し、そのまま 1 本に連結してダウンロードします。</p>
-      </a>
-      <a class="card" href="#ugoira">
-        <span class="card-tag">02 / UGOIRA</span>
-        <h2>うごイラ</h2>
-        <p>動画の必要区間だけを JPG 連番にして、zip でまとめて書き出します。</p>
-      </a>
-      <a class="card" href="#pixiv">
-        <span class="card-tag">03 / RESIZE</span>
-        <h2>pixivリサイズ</h2>
-        <p>長辺 900px プレビュー上で正方形領域を調整し、900×900 の画像として出力します。</p>
-      </a>
-    </section>
-
     <div class="stack">
       <section class="panel" id="concat">
         <div class="panel-head">
@@ -677,7 +706,8 @@
             <h2>うごイラ</h2>
             <p>
               動画を 1 本読み込み、開始と終了、フレームレートを指定して 5 桁連番 JPG を zip にまとめます。
-              初期値は 8fps です。
+              初期値は 8fps です。うごイラの初期値が8FPSなので変更しないことをおすすめします。
+              変更する場合は事前にうごイラ投稿画面に複数枚画像を入れて操作感を確認してからにしてください。
             </p>
           </div>
           <p class="hint">処理中はログと進捗が出ます。必要なら途中でキャンセルできます。</p>
@@ -771,11 +801,124 @@
           </div>
         </div>
       </section>
+
+      <section class="panel" id="character">
+        <div class="panel-head">
+          <div>
+            <h2>オリキャラ設定ツール</h2>
+            <p>
+              髪型や色、アクセサリ、LoRA、動画向けの演出有無を選ぶと、
+              pnginfo 形式の 1 テキストをそのまま組み立てます。
+            </p>
+          </div>
+          <p class="hint">場所は最下部です。選択変更は即時反映され、生成画面へそのまま貼り付けられます。</p>
+        </div>
+        <div class="grid">
+          <div class="subpanel">
+            <h3>設定</h3>
+            <div class="form-grid">
+              <label class="field">
+                髪型
+                <select id="characterHairStyle">
+                  <option value="short hair">ショート</option>
+                  <option value="medium hair" selected>ミディアム</option>
+                  <option value="long hair">ロング</option>
+                  <option value="extra long hair">エクストラロング</option>
+                </select>
+              </label>
+              <label class="field">
+                髪型追加
+                <select id="characterHairExtra">
+                  <option value="" selected>なし</option>
+                  <option value="twintails">ツインテール</option>
+                  <option value="ponytail">ポニーテール</option>
+                </select>
+              </label>
+              <label class="field">
+                髪色
+                <select id="characterHairColor">
+                  <option value="black" selected>黒</option>
+                  <option value="brown">茶</option>
+                  <option value="blonde">金</option>
+                  <option value="silver">銀</option>
+                </select>
+              </label>
+              <label class="field">
+                目の色
+                <select id="characterEyeColor">
+                  <option value="pink eyes">ピンク</option>
+                  <option value="red eyes">赤</option>
+                  <option value="orange eyes">オレンジ</option>
+                  <option value="yellow eyes">黄色</option>
+                  <option value="green eyes" selected>緑</option>
+                  <option value="aqua eyes">水色</option>
+                  <option value="blue eyes">青</option>
+                  <option value="purple eyes">紫</option>
+                </select>
+              </label>
+              <label class="field">
+                頭部へのアクセント
+                <select id="characterHeadAccent">
+                  <option value="" selected>なし</option>
+                  <option value="hairpin">ヘアピン</option>
+                  <option value="headband">カチューシャ</option>
+                  <option value="ribbon">リボン</option>
+                </select>
+              </label>
+              <label class="field">
+                おっぱい
+                <select id="characterBust">
+                  <option value="large breasts" selected>巨乳</option>
+                  <option value="huge breasts">爆乳</option>
+                </select>
+              </label>
+              <label class="field">
+                肌の色
+                <select id="characterSkinColor">
+                  <option value="" selected>指定なし</option>
+                  <option value="tan">日焼け肌</option>
+                  <option value="dark skin">色黒・褐色肌</option>
+                </select>
+              </label>
+              <label class="field field-span" style="display: none;">
+                LoRA
+                <select id="characterLora">
+                  <option value="" selected>なし</option>
+                  <option value="<lora:ATNR_V1.1_Lokr_f4_warmup_stable_decay:0.2>">ATNR_V1.1_Lokr_f4_warmup_stable_decay:0.2</option>
+                  <option value="<lora:USNR_V1.1_Lokr_f4_warmup_stable_decay:0.2>">USNR_V1.1_Lokr_f4_warmup_stable_decay:0.2</option>
+                </select>
+              </label>
+              <label class="field field-span">
+                動画用
+                <span class="checkline">
+                  <input id="characterVideoMode" type="checkbox">
+                  動画向けのネガティブ要素を追加する
+                </span>
+              </label>
+            </div>
+            <div class="controls">
+              <button class="secondary" id="characterReset">初期値に戻す</button>
+              <button class="primary" id="characterCopyPrompt">pnginfo をコピー</button>
+            </div>
+            <div class="status-row">
+              <div class="status-card" id="characterStatus">
+                <div class="status-text">選択すると pnginfo を自動生成します。</div>
+              </div>
+            </div>
+          </div>
+          <div class="subpanel">
+            <h3>pnginfo</h3>
+            <div class="prompt-output">
+              <label class="field">
+                出力
+                <textarea id="characterPngInfo" readonly></textarea>
+              </label>
+            </div>
+          </div>
+        </div>
+      </section>
     </div>
 
-    <p class="footer">
-      外部ライブラリ: <code>ffmpeg.wasm</code> / <code>JSZip</code>。初回の動画処理時はコアの読み込みに少し時間がかかります。
-    </p>
   </div>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
   <script type="module">
@@ -822,6 +965,95 @@
       drag: null,
     };
 
+    const characterDefaults = {
+      hairStyle: "medium hair",
+      hairExtra: "",
+      hairColor: "black",
+      eyeColor: "green eyes",
+      headAccent: "",
+      bust: "large breasts",
+      skinColor: "",
+      videoMode: false,
+    };
+
+    const characterNegativeBase = [
+      "(multi color hair,Inner color:1.2)",
+      "score_6",
+      "score_5",
+      "score_4",
+      "score_furry",
+      "source_pony",
+      "source_cartoon",
+      "ugly face",
+      "ugly eyes",
+      "red pupils",
+      "(deformity, out door)",
+      "username",
+      "manicure",
+      "earring",
+      "bag",
+      "shoes",
+      "text",
+      "letters",
+      "symbols",
+      "question mark",
+      "watermark",
+      "logo",
+      "(sword:1.2)",
+    ];
+
+    const characterNegativeVideo = [
+      "wet water",
+      "action lines",
+      "impact lines",
+      "speed lines",
+      "collision effect",
+      "comic burst",
+      "comic effect lines",
+      "manga effect",
+      "stylized explosion",
+      "motion blur lines",
+      "cartoon impact",
+      "dynamic lines",
+      "swoosh lines",
+      "onomatopoeia",
+      "steam",
+      "hot steam",
+      "vapor",
+      "mist",
+      "fog",
+      "condensation",
+      "visible breath",
+      "breath vapor",
+      "breath mist",
+      "white breath",
+      "puff of air",
+      "breath puff",
+      "breath cloud",
+      "anime breath",
+      "smoke puff",
+      "sweat",
+      "perspiration",
+      "sweat drops",
+      "sweatdrop",
+      "dripping sweat",
+      "sweat beads",
+      "water droplets",
+      "droplets",
+      "wet skin",
+      "wet spot",
+      "damp skin",
+      "moist skin",
+      "oily sheen",
+      "glistening skin",
+      "sweaty shine",
+      "dripping liquid",
+      "trickle",
+      "sticky skin",
+    ];
+
+    const characterSettingsText = "Steps: 25, Sampler: Euler a, Schedule type: Automatic, CFG scale: 7, Seed: -1, Size: 768x1088, Model hash: bdb59bac77, Model: waiNSFWIllustrious_v140, Denoising strength: 0.37, ADetailer model: face_yolov8n.pt, ADetailer confidence: 0.3, ADetailer dilate erode: 4, ADetailer mask blur: 4, ADetailer denoising strength: 0.4, ADetailer inpaint only masked: True, ADetailer inpaint padding: 32, ADetailer version: 25.3.0, Hires Module 1: Use same choices, Hires CFG Scale: 5, Hires upscale: 1.5, Hires upscaler: R-ESRGAN 4x+, Version: f2.0.1v1.10.1-previous-669-gdfdcbab6, Module 1: sdxl_vae";
+
     const concatEls = {
       input: document.getElementById("concatInput"),
       drop: document.getElementById("concatDrop"),
@@ -832,6 +1064,22 @@
       progress: document.getElementById("concatProgress"),
       status: document.getElementById("concatStatus"),
       log: document.getElementById("concatLog"),
+    };
+
+    const characterEls = {
+      hairStyle: document.getElementById("characterHairStyle"),
+      hairExtra: document.getElementById("characterHairExtra"),
+      hairColor: document.getElementById("characterHairColor"),
+      eyeColor: document.getElementById("characterEyeColor"),
+      headAccent: document.getElementById("characterHeadAccent"),
+      bust: document.getElementById("characterBust"),
+      skinColor: document.getElementById("characterSkinColor"),
+      lora: document.getElementById("characterLora"),
+      videoMode: document.getElementById("characterVideoMode"),
+      reset: document.getElementById("characterReset"),
+      copyPrompt: document.getElementById("characterCopyPrompt"),
+      pngInfo: document.getElementById("characterPngInfo"),
+      status: document.getElementById("characterStatus"),
     };
 
     const ugoiraEls = {
@@ -907,6 +1155,10 @@
 
     function sanitizeBaseName(name) {
       return name.replace(/\.[^.]+$/, "");
+    }
+
+    function joinPromptParts(parts) {
+      return parts.filter(Boolean).join(",");
     }
 
     function splitName(name) {
@@ -1125,6 +1377,76 @@
         onFiles(files);
         input.value = "";
       });
+    }
+
+    function buildCharacterPrompt() {
+      const promptParts = [
+        characterEls.lora.value,
+        `${characterEls.hairColor.value} hair`,
+        characterEls.hairStyle.value,
+        characterEls.hairExtra.value,
+        characterEls.headAccent.value,
+        characterEls.eyeColor.value,
+        characterEls.bust.value,
+        characterEls.skinColor.value,
+        "school uniform",
+        "classroom",
+        "Wave hand",
+        "standing",
+        "cowboy shot",
+        "smile",
+      ];
+      const negativeParts = [
+        ...characterNegativeBase,
+        ...(characterEls.videoMode.checked ? characterNegativeVideo : []),
+      ];
+
+      return {
+        pngInfo: [
+          `${joinPromptParts(promptParts)}`,
+          `Negative prompt: ${negativeParts.join(",")}`,
+          characterSettingsText,
+        ].join("\n"),
+      };
+    }
+
+    function updateCharacterTool() {
+      const prompt = buildCharacterPrompt();
+      characterEls.pngInfo.value = prompt.pngInfo;
+      setStatus(
+        characterEls.status,
+        `pnginfo 更新済み: LoRA ${characterEls.lora.value ? "ON" : "OFF"} / 動画用 ${characterEls.videoMode.checked ? "ON" : "OFF"}`,
+        "default"
+      );
+    }
+
+    async function copyText(text) {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        return;
+      }
+      const temp = document.createElement("textarea");
+      temp.value = text;
+      temp.setAttribute("readonly", "readonly");
+      temp.style.position = "fixed";
+      temp.style.opacity = "0";
+      document.body.append(temp);
+      temp.select();
+      document.execCommand("copy");
+      temp.remove();
+    }
+
+    function resetCharacterTool() {
+      characterEls.hairStyle.value = characterDefaults.hairStyle;
+      characterEls.hairExtra.value = characterDefaults.hairExtra;
+      characterEls.hairColor.value = characterDefaults.hairColor;
+      characterEls.eyeColor.value = characterDefaults.eyeColor;
+      characterEls.headAccent.value = characterDefaults.headAccent;
+      characterEls.bust.value = characterDefaults.bust;
+      characterEls.skinColor.value = characterDefaults.skinColor;
+      characterEls.lora.value = "";
+      characterEls.videoMode.checked = characterDefaults.videoMode;
+      updateCharacterTool();
     }
 
     async function ensureVendorFFmpegModuleURL() {
@@ -1878,6 +2200,35 @@
       setStatus(pixivEls.status, `${outputName} をダウンロードしました。`, "success");
     });
 
+    [
+      characterEls.hairStyle,
+      characterEls.hairExtra,
+      characterEls.hairColor,
+      characterEls.eyeColor,
+      characterEls.headAccent,
+      characterEls.bust,
+      characterEls.skinColor,
+      characterEls.lora,
+      characterEls.videoMode,
+    ].forEach((element) => {
+      element.addEventListener("input", updateCharacterTool);
+      element.addEventListener("change", updateCharacterTool);
+    });
+
+    characterEls.reset.addEventListener("click", () => {
+      resetCharacterTool();
+      setStatus(characterEls.status, "初期値に戻しました。", "success");
+    });
+
+    characterEls.copyPrompt.addEventListener("click", async () => {
+      try {
+        await copyText(characterEls.pngInfo.value);
+        setStatus(characterEls.status, "pnginfo をコピーしました。", "success");
+      } catch (error) {
+        setStatus(characterEls.status, `コピーに失敗しました。${error.message || error}`, "error");
+      }
+    });
+
     setupDropzone(concatEls.drop, concatEls.input, addConcatFiles);
     setupDropzone(ugoiraEls.drop, ugoiraEls.input, (files) => {
       if (files[0]) {
@@ -1894,6 +2245,7 @@
       }
     });
 
+    resetCharacterTool();
     renderConcatList();
     drawPixivCanvas();
   </script>
