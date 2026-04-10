@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>オリキャラ設定 | AI動画短期講座ツール</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="../../assets/css/base.css">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="page">
+    <div class="topbar">
+      <a class="topbar-link" href="../..">一覧へ戻る</a>
+      <nav class="topbar-nav" aria-label="ツール移動">
+        <a class="topbar-link" href="../concat">動画連結</a>
+        <a class="topbar-link" href="../ugoira">うごイラ</a>
+        <a class="topbar-link" href="../pixiv">pixivリサイズ</a>
+      </nav>
+    </div>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <span class="eyebrow">CHARACTER PROMPT</span>
+          <h1>オリキャラ設定ツール</h1>
+          <p>
+            髪型や色、アクセサリ、LoRA、動画向けの演出有無を選ぶと、
+            pnginfo 形式の 1 テキストをそのまま組み立てます。
+          </p>
+        </div>
+        <p class="hint">選択変更は即時反映され、生成画面へそのまま貼り付けられます。</p>
+      </div>
+
+      <div class="grid">
+        <div class="subpanel">
+          <h3>設定</h3>
+          <div class="form-grid">
+            <label class="field">
+              髪型
+              <select id="characterHairStyle">
+                <option value="short hair">ショート</option>
+                <option value="medium hair" selected>ミディアム</option>
+                <option value="long hair">ロング</option>
+                <option value="extra long hair">エクストラロング</option>
+              </select>
+            </label>
+            <label class="field">
+              髪型追加
+              <select id="characterHairExtra">
+                <option value="" selected>なし</option>
+                <option value="twintails">ツインテール</option>
+                <option value="ponytail">ポニーテール</option>
+              </select>
+            </label>
+            <label class="field">
+              髪色
+              <select id="characterHairColor">
+                <option value="black" selected>黒</option>
+                <option value="brown">茶</option>
+                <option value="blonde">金</option>
+                <option value="silver">銀</option>
+              </select>
+            </label>
+            <label class="field">
+              目の色
+              <select id="characterEyeColor">
+                <option value="pink eyes">ピンク</option>
+                <option value="red eyes">赤</option>
+                <option value="orange eyes">オレンジ</option>
+                <option value="yellow eyes">黄色</option>
+                <option value="green eyes" selected>緑</option>
+                <option value="aqua eyes">水色</option>
+                <option value="blue eyes">青</option>
+                <option value="purple eyes">紫</option>
+              </select>
+            </label>
+            <label class="field">
+              頭部へのアクセント
+              <select id="characterHeadAccent">
+                <option value="" selected>なし</option>
+                <option value="hairpin">ヘアピン</option>
+                <option value="headband">カチューシャ</option>
+                <option value="ribbon">リボン</option>
+              </select>
+            </label>
+            <label class="field">
+              おっぱい
+              <select id="characterBust">
+                <option value="large breasts" selected>巨乳</option>
+                <option value="huge breasts">爆乳</option>
+              </select>
+            </label>
+            <label class="field">
+              肌の色
+              <select id="characterSkinColor">
+                <option value="" selected>指定なし</option>
+                <option value="tan">日焼け肌</option>
+                <option value="dark skin">色黒・褐色肌</option>
+              </select>
+            </label>
+            <label class="field field-span" style="display: none;">
+              LoRA
+              <select id="characterLora">
+                <option value="" selected>なし</option>
+                <option value="<lora:ATNR_V1.1_Lokr_f4_warmup_stable_decay:0.2>">ATNR_V1.1_Lokr_f4_warmup_stable_decay:0.2</option>
+                <option value="<lora:USNR_V1.1_Lokr_f4_warmup_stable_decay:0.2>">USNR_V1.1_Lokr_f4_warmup_stable_decay:0.2</option>
+              </select>
+            </label>
+            <label class="field field-span">
+              動画用
+              <span class="checkline">
+                <input id="characterVideoMode" type="checkbox">
+                動画向けのネガティブ要素を追加する
+              </span>
+            </label>
+          </div>
+          <div class="controls">
+            <button class="secondary" id="characterReset">初期値に戻す</button>
+            <button class="primary" id="characterCopyPrompt">pnginfo をコピー</button>
+          </div>
+          <div class="status-row">
+            <div class="status-card" id="characterStatus">
+              <div class="status-text">選択すると pnginfo を自動生成します。</div>
+            </div>
+          </div>
+        </div>
+        <div class="subpanel">
+          <h3>pnginfo</h3>
+          <label class="field">
+            出力
+            <textarea id="characterPngInfo" readonly></textarea>
+          </label>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script src="../../assets/js/app.js"></script>
+</body>
+</html>

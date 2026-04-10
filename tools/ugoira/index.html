@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>うごイラ | AI動画短期講座ツール</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="../../assets/css/base.css">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="page">
+    <div class="topbar">
+      <a class="topbar-link" href="../..">一覧へ戻る</a>
+      <nav class="topbar-nav" aria-label="ツール移動">
+        <a class="topbar-link" href="../concat">動画連結</a>
+        <a class="topbar-link" href="../pixiv">pixivリサイズ</a>
+        <a class="topbar-link" href="../character">オリキャラ設定</a>
+      </nav>
+    </div>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <span class="eyebrow">UGOIRA EXPORT</span>
+          <h1>うごイラ</h1>
+          <p>
+            動画を 1 本読み込み、開始と終了、フレームレートを指定して 5 桁連番 JPG を zip にまとめます。
+            初期値は 8fps です。うごイラ投稿の初期値に合わせているので、変更前に投稿画面で操作感を確認してください。
+          </p>
+        </div>
+        <p class="hint">処理中はログと進捗が出ます。必要なら途中でキャンセルできます。</p>
+      </div>
+
+      <div class="grid">
+        <div class="subpanel">
+          <h3>動画設定</h3>
+          <label class="dropzone" id="ugoiraDrop">
+            <input id="ugoiraInput" type="file" accept="video/*">
+            <span>
+              <strong>動画をドロップ</strong>
+              1 本だけ選択します
+            </span>
+          </label>
+          <div class="video-frame" id="ugoiraPreviewWrap" hidden>
+            <video id="ugoiraPreview" controls preload="metadata"></video>
+          </div>
+          <div class="controls">
+            <label class="field">
+              開始秒
+              <input id="ugoiraStart" type="number" min="0" step="0.01" value="0">
+            </label>
+            <label class="field">
+              終了秒
+              <input id="ugoiraEnd" type="number" min="0" step="0.01" value="0">
+            </label>
+            <label class="field">
+              フレームレート
+              <input id="ugoiraFps" type="number" min="1" step="1" value="8">
+            </label>
+          </div>
+          <div class="controls">
+            <button class="ghost" id="ugoiraMarkStart">現在位置を開始へ</button>
+            <button class="ghost" id="ugoiraMarkEnd">現在位置を終了へ</button>
+            <button class="primary" id="ugoiraRun">zipを作成してダウンロード</button>
+            <button class="danger" id="ugoiraCancel" disabled>処理をキャンセル</button>
+          </div>
+          <div class="progress-shell" aria-hidden="true">
+            <div class="progress-bar" id="ugoiraProgress"></div>
+          </div>
+          <div class="status-row">
+            <div class="status-card" id="ugoiraStatus">
+              <div class="status-text">動画を追加すると、長さと想定フレーム数を表示します。</div>
+            </div>
+          </div>
+        </div>
+        <div class="subpanel">
+          <h3>処理ログ</h3>
+          <div class="log" id="ugoiraLog">うごイラログ待機中</div>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script src="../../assets/js/app.js"></script>
+</body>
+</html>

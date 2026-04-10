@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>pixivリサイズ | AI動画短期講座ツール</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="../../assets/css/base.css">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="page">
+    <div class="topbar">
+      <a class="topbar-link" href="../..">一覧へ戻る</a>
+      <nav class="topbar-nav" aria-label="ツール移動">
+        <a class="topbar-link" href="../concat">動画連結</a>
+        <a class="topbar-link" href="../ugoira">うごイラ</a>
+        <a class="topbar-link" href="../character">オリキャラ設定</a>
+      </nav>
+    </div>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <span class="eyebrow">PIXIV RESIZE</span>
+          <h1>pixivリサイズ</h1>
+          <p>
+            画像を読み込むと、長辺 900px のプレビューに正方形クロップ領域を重ねます。
+            領域はドラッグで移動、四隅でリサイズできます。
+          </p>
+        </div>
+        <p class="hint">ダウンロードでは選択領域を 900×900 へ書き出します。</p>
+      </div>
+
+      <div class="grid">
+        <div class="subpanel">
+          <h3>画像追加</h3>
+          <label class="dropzone" id="pixivDrop">
+            <input id="pixivInput" type="file" accept="image/*">
+            <span>
+              <strong>画像をドロップ</strong>
+              PNG / JPEG / WebP など一般的な画像を想定
+            </span>
+          </label>
+          <div class="controls">
+            <button class="primary" id="pixivDownload">リサイズ後をダウンロード</button>
+            <button class="secondary" id="pixivReset">領域をリセット</button>
+          </div>
+          <div class="status-row">
+            <div class="status-card" id="pixivStatus">
+              <div class="status-text">画像を追加するとここにサイズ情報を表示します。</div>
+            </div>
+          </div>
+        </div>
+        <div class="subpanel">
+          <h3>プレビュー</h3>
+          <div class="canvas-shell">
+            <canvas id="pixivCanvas" width="900" height="900"></canvas>
+          </div>
+          <p class="caption" id="pixivCaption">ドラッグで移動、四隅のハンドルで正方形の大きさを調整します。</p>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script src="../../assets/js/app.js"></script>
+</body>
+</html>

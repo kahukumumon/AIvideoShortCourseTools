@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>動画連結 | AI動画短期講座ツール</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="../../assets/css/base.css">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="page">
+    <div class="topbar">
+      <a class="topbar-link" href="../..">一覧へ戻る</a>
+      <nav class="topbar-nav" aria-label="ツール移動">
+        <a class="topbar-link" href="../ugoira">うごイラ</a>
+        <a class="topbar-link" href="../pixiv">pixivリサイズ</a>
+        <a class="topbar-link" href="../character">オリキャラ設定</a>
+      </nav>
+    </div>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <span class="eyebrow">VIDEO CONCAT</span>
+          <h1>動画連結</h1>
+          <p>
+            動画を複数追加して順番を入れ替え、無劣化優先の <code>-c copy</code> で連結します。
+            同一 codec / 解像度 / fps / 音声構成の素材を使ってください。
+          </p>
+        </div>
+        <p class="hint">プレビューは表示しません。処理ログは右側にそのまま残します。</p>
+      </div>
+
+      <div class="warning" id="protocolWarning" hidden>
+        <code>file://</code> で開くと CDN や ffmpeg 読み込みに制限が出る場合があります。必要ならローカルサーバー経由で開いてください。
+      </div>
+
+      <div class="grid">
+        <div class="subpanel">
+          <h3>素材追加</h3>
+          <label class="dropzone" id="concatDrop">
+            <input id="concatInput" type="file" accept="video/*" multiple>
+            <span>
+              <strong>動画をドラッグ＆ドロップ</strong>
+              クリック選択にも対応 / 同名ファイルは自動で連番表示
+            </span>
+          </label>
+          <div class="controls">
+            <button class="secondary" id="concatClear">リストを空にする</button>
+            <button class="primary" id="concatRun">連結してダウンロード</button>
+            <button class="danger" id="concatCancel" disabled>処理をキャンセル</button>
+          </div>
+          <div class="progress-shell" aria-hidden="true">
+            <div class="progress-bar" id="concatProgress"></div>
+          </div>
+          <div class="status-row">
+            <div class="status-card" id="concatStatus">
+              <div class="status-text">素材を追加するとここに状態を表示します。</div>
+            </div>
+          </div>
+          <div class="list" id="concatList">
+            <div class="empty">まだ動画が追加されていません。</div>
+          </div>
+        </div>
+        <div class="subpanel">
+          <h3>処理ログ</h3>
+          <div class="log" id="concatLog">動画連結ログ待機中</div>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script src="../../assets/js/app.js"></script>
+</body>
+</html>
