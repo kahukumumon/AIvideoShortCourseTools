@@ -1,4 +1,4 @@
-.page-home {
+﻿.page-home {
   display: grid;
   gap: 24px;
 }
@@ -69,3 +69,10 @@
     grid-template-columns: 1fr;
   }
 }
+
+.tool-card-video-edit {
+  --brand: #8f3e22;
+  --brand-deep: #652511;
+  --brand-soft: rgba(143, 62, 34, 0.12);
+}
+
