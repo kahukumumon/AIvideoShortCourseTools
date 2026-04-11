@@ -33,11 +33,12 @@ import {
   trimClip,
 } from './lib/timeline';
 
-const PIXELS_PER_SECOND = 88;
+const MAX_PIXELS_PER_SECOND = 88;
+const MIN_PIXELS_PER_SECOND = 24;
 
 type DragMode = 'move' | 'trim-start' | 'trim-end' | 'speed-start' | 'speed-end';
 type FlattenedAudioClip = AudioClip & { trackId: string };
-type DropTarget = 'video' | 'audio' | null;
+type DropTarget = 'video' | `audio:${string}` | null;
 
 function isVideoFile(file: File) {
   return file.type.startsWith('video/');
@@ -49,6 +50,14 @@ function isAudioFile(file: File) {
 
 function hasDraggedFiles(dataTransfer: DataTransfer | null) {
   return Boolean(dataTransfer && Array.from(dataTransfer.types).includes('Files'));
+}
+
+function isTimelineInteractiveElement(target: HTMLElement) {
+  return Boolean(
+    target.closest(
+      'button, input, select, textarea, label, a, [role="button"], [data-no-timeline-seek], .audio-track-bar, .context-menu',
+    ),
+  );
 }
 
 function createAudioTrack(index: number): AudioTrack {
@@ -100,9 +109,14 @@ function App() {
   const [exportLogs, setExportLogs] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [dropTarget, setDropTarget] = useState<DropTarget>(null);
+  const [timelineViewportWidth, setTimelineViewportWidth] = useState(0);
 
   const previewVideoRef = useRef<HTMLVideoElement | null>(null);
+  const videoInputRef = useRef<HTMLInputElement | null>(null);
+  const audioInputRef = useRef<HTMLInputElement | null>(null);
+  const timelineScrollRef = useRef<HTMLDivElement | null>(null);
   const audioRefs = useRef<Record<string, HTMLAudioElement | null>>({});
+  const audioPickerTrackIdRef = useRef<string>(initialTrack.id);
   const playbackFrameRef = useRef<number | null>(null);
   const playbackStateRef = useRef({ startedAt: 0, startedFrom: 0 });
   const dragRef = useRef<{
@@ -167,7 +181,13 @@ function App() {
     window.addEventListener('resize', updateContextMenuPosition);
     return () => window.removeEventListener('resize', updateContextMenuPosition);
   }, [contextMenu, contextMenuClip]);
-  const timelineWidth = Math.max(12, Math.ceil(timelineDuration) + 1) * PIXELS_PER_SECOND;
+  const timelineSeconds = Math.max(1, Math.ceil(timelineDuration) + 1);
+  const pixelsPerSecond = useMemo(() => {
+    if (timelineViewportWidth <= 0) return MAX_PIXELS_PER_SECOND;
+    const fitted = timelineViewportWidth / timelineSeconds;
+    return Math.max(MIN_PIXELS_PER_SECOND, Math.min(MAX_PIXELS_PER_SECOND, fitted));
+  }, [timelineSeconds, timelineViewportWidth]);
+  const timelineWidth = Math.max(timelineViewportWidth, timelineSeconds * pixelsPerSecond);
   const previewFade = activeVideoClip ? 1 - fadeGain(activeVideoClip, playhead) : 1;
   const previewAspectRatio = videoSources.length > 0 && videoSources[0]?.width && videoSources[0]?.height
     ? `${videoSources[0].width} / ${videoSources[0].height}`
@@ -178,6 +198,20 @@ function App() {
       setSelectedTrackId(audioTracks[0]?.id ?? '');
     }
   }, [audioTracks, selectedTrackId]);
+
+  useEffect(() => {
+    const element = timelineScrollRef.current;
+    if (!element) return;
+
+    const updateWidth = () => {
+      setTimelineViewportWidth(element.clientWidth);
+    };
+
+    updateWidth();
+    const observer = new ResizeObserver(updateWidth);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -221,6 +255,10 @@ function App() {
         const localTime = effectiveTime - activeClip.timelineStart;
         const resolution = resolveSegmentAtPlaytime(activeClip, localTime);
         const source = sourceMap.get(resolution.seg.sourceId);
+        if (!source) {
+          videoElement.pause();
+          return;
+        }
         if (videoElement.src !== source.objectUrl) {
           videoElement.src = source.objectUrl;
         }
@@ -229,7 +267,7 @@ function App() {
           mozPreservesPitch?: boolean;
           webkitPreservesPitch?: boolean;
         };
-        mediaElement.playbackRate = resolution.seg.speed;
+        mediaElement.playbackRate = resolution.effectiveSpeed;
         mediaElement.preservesPitch = true;
         mediaElement.mozPreservesPitch = true;
         mediaElement.webkitPreservesPitch = true;
@@ -274,7 +312,7 @@ function App() {
         mozPreservesPitch?: boolean;
         webkitPreservesPitch?: boolean;
       };
-      mediaElement.playbackRate = resolution.seg.speed;
+      mediaElement.playbackRate = resolution.effectiveSpeed;
       mediaElement.preservesPitch = true;
       mediaElement.mozPreservesPitch = true;
       mediaElement.webkitPreservesPitch = true;
@@ -379,9 +417,9 @@ function App() {
     }
   }
 
-  async function handleAudioFiles(files: FileList | File[]) {
+  async function handleAudioFiles(files: FileList | File[], explicitTrackId?: string) {
     const list = Array.from(files);
-    const targetTrackId = selectedTrackId || audioTracks[0]?.id;
+    const targetTrackId = explicitTrackId || selectedTrackId || audioTracks[0]?.id;
     if (!targetTrackId || list.length === 0) return;
 
     try {
@@ -428,6 +466,40 @@ function App() {
     }
   }
 
+  function openVideoPicker() {
+    videoInputRef.current?.click();
+  }
+
+  function openAudioPicker(trackId: string) {
+    audioPickerTrackIdRef.current = trackId;
+    setSelectedTrackId(trackId);
+    audioInputRef.current?.click();
+  }
+
+  function addAudioTrack() {
+    const next = createAudioTrack(audioTracks.length + 1);
+    setAudioTracks((tracks) => [...tracks, next]);
+    setSelectedTrackId(next.id);
+    setBulkValues((current) => ({ ...current, [next.id]: '0' }));
+  }
+
+  function deleteAudioTrack(trackId: string) {
+    const track = audioTracks.find((item) => item.id === trackId);
+    if (!track) return;
+
+    setAudioTracks((tracks) => tracks.filter((item) => item.id !== trackId));
+    setBulkValues((current) => {
+      const next = { ...current };
+      delete next[trackId];
+      return next;
+    });
+    if (audioPickerTrackIdRef.current === trackId) {
+      const fallback = audioTracks.find((item) => item.id !== trackId)?.id ?? '';
+      audioPickerTrackIdRef.current = fallback;
+    }
+    setStatus(`${track.name} を削除しました。`);
+  }
+
   function collectFiles(fileList: FileList | null) {
     return fileList ? Array.from(fileList) : [];
   }
@@ -445,17 +517,17 @@ function App() {
     setDropTarget('video');
   }
 
-  function handleAudioDragOver(event: ReactDragEvent<HTMLElement>) {
+  function handleAudioDragOver(event: ReactDragEvent<HTMLElement>, trackId: string) {
     if (!hasDraggedFiles(event.dataTransfer)) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = 'copy';
-    setDropTarget('audio');
+    setDropTarget(`audio:${trackId}`);
   }
 
-  function handleAudioDragEnter(event: ReactDragEvent<HTMLElement>) {
+  function handleAudioDragEnter(event: ReactDragEvent<HTMLElement>, trackId: string) {
     if (!hasDraggedFiles(event.dataTransfer)) return;
     event.preventDefault();
-    setDropTarget('audio');
+    setDropTarget(`audio:${trackId}`);
   }
 
   function handleDragLeave(event: ReactDragEvent<HTMLElement>, target: Exclude<DropTarget, null>) {
@@ -479,7 +551,7 @@ function App() {
     void handleVideoFile(file);
   }
 
-  function handleAudioDrop(event: ReactDragEvent<HTMLElement>) {
+  function handleAudioDrop(event: ReactDragEvent<HTMLElement>, trackId: string) {
     event.preventDefault();
     setDropTarget(null);
     const files = collectFiles(event.dataTransfer.files).filter(isAudioFile);
@@ -487,7 +559,8 @@ function App() {
       setStatus('音声ファイルをドロップしてください。');
       return;
     }
-    void handleAudioFiles(files);
+    setSelectedTrackId(trackId);
+    void handleAudioFiles(files, trackId);
   }
 
   function beginDrag(
@@ -545,7 +618,7 @@ function App() {
     const rect = container.getBoundingClientRect();
     const relativeX = clientX - rect.left + container.scrollLeft;
     const maxTime = Math.max(timelineDuration, 0);
-    const next = Math.max(0, Math.min(maxTime, relativeX / PIXELS_PER_SECOND));
+    const next = Math.max(0, Math.min(maxTime, relativeX / pixelsPerSecond));
     stopPlaybackForSeek();
     setPlayhead(next);
   }
@@ -554,6 +627,7 @@ function App() {
     if (event.button !== 0) return;
     const target = event.target as HTMLElement;
     if (target.closest('.clip-block')) return;
+    if (isTimelineInteractiveElement(target)) return;
 
     setContextMenu(null);
     seekDragActiveRef.current = true;
@@ -703,7 +777,7 @@ function App() {
       const drag = dragRef.current;
       if (!drag) return;
 
-      const deltaSeconds = (event.clientX - drag.originX) / PIXELS_PER_SECOND;
+      const deltaSeconds = (event.clientX - drag.originX) / pixelsPerSecond;
       if (drag.kind === 'video') {
         setVideoClips((clips) => {
           switch (drag.mode) {
@@ -811,251 +885,238 @@ function App() {
           </div>
         </div>
 
-        <div className="editor-grid">
-          <section className="editor-pane left-pane">
-            <div className="stack">
-              <label
-                className={`dropzone ${dropTarget === 'video' ? 'dropzone-active' : ''}`}
-                onDragOver={handleVideoDragOver}
-                onDragEnter={handleVideoDragEnter}
-                onDragLeave={(event) => handleDragLeave(event, 'video')}
-                onDrop={handleVideoDrop}
-              >
-                <span>無音動画を追加</span>
-                <small>クリックまたは動画ファイルをドロップ</small>
-                <input
-                  type="file"
-                  accept="video/*"
-                  onChange={(event) => {
-                    const file = event.target.files?.[0];
-                    if (file) {
-                      void handleVideoFile(file);
-                    }
-                    event.currentTarget.value = '';
-                  }}
-                />
-              </label>
-
-              <div className="audio-import-row">
-                <label
-                  className={`dropzone compact-dropzone ${dropTarget === 'audio' ? 'dropzone-active' : ''}`}
-                  onDragOver={handleAudioDragOver}
-                  onDragEnter={handleAudioDragEnter}
-                  onDragLeave={(event) => handleDragLeave(event, 'audio')}
-                  onDrop={handleAudioDrop}
-                >
-                  <span>音声を追加</span>
-                  <small>クリックまたは音声ファイルをドロップ</small>
-                  <input
-                    type="file"
-                    accept="audio/*"
-                    multiple
-                    onChange={(event) => {
-                      const files = event.target.files;
-                      if (files && files.length > 0) {
-                        void handleAudioFiles(files);
-                      }
-                      event.currentTarget.value = '';
-                    }}
-                  />
-                </label>
-
-                <div className="track-actions">
-                  <label className="field small-field">
-                    <span>追加先トラック</span>
-                    <select value={selectedTrackId} onChange={(event) => setSelectedTrackId(event.target.value)}>
-                      {audioTracks.map((track) => (
-                        <option key={track.id} value={track.id}>{track.name}</option>
-                      ))}
-                    </select>
-                  </label>
-
-                  <button
-                    className="secondary"
-                    type="button"
-                    onClick={() => {
-                      const next = createAudioTrack(audioTracks.length + 1);
-                      setAudioTracks((tracks) => [...tracks, next]);
-                      setSelectedTrackId(next.id);
-                      setBulkValues((current) => ({ ...current, [next.id]: '0' }));
-                    }}
-                  >
-                    音声トラック追加
-                  </button>
-                </div>
+        <section className="editor-pane">
+          <div className="stack">
+            <section className="preview-card">
+              <h2>プレビュー</h2>
+              <p className="section-note">現在の再生位置を確認します。フェードや速度変更の結果もここでそのままチェックできます。</p>
+              <div className="preview-frame" style={{ aspectRatio: previewAspectRatio }}>
+                {videoSources.length > 0 ? (
+                  <>
+                    <video ref={previewVideoRef} playsInline preload="auto" />
+                    <div className="preview-fade" style={{ opacity: previewFade }} />
+                  </>
+                ) : (
+                  <div className="preview-empty">動画を追加するとここにプレビューが表示されます。</div>
+                )}
               </div>
 
-              <section className="preview-card">
-                <h2>プレビュー</h2>
-                <div className="preview-frame" style={{ aspectRatio: previewAspectRatio }}>
-                  {videoSources.length > 0 ? (
-                    <>
-                      <video ref={previewVideoRef} playsInline preload="auto" />
-                      <div className="preview-fade" style={{ opacity: previewFade }} />
-                    </>
-                  ) : (
-                    <div className="preview-empty">動画を追加するとここにプレビューが表示されます。</div>
-                  )}
-                </div>
+              <div className="player-controls">
+                <button className="primary" type="button" onClick={() => (isPlaying ? stopPlayback(false) : startPlayback())}>
+                  {isPlaying ? '停止' : '再生'}
+                </button>
+                <button className="secondary" type="button" onClick={() => stopPlayback(true)}>
+                  先頭へ
+                </button>
+                <div className="timecode">{formatTime(playhead)} / {formatTime(timelineDuration)}</div>
+              </div>
+            </section>
 
-                <div className="player-controls">
-                  <button className="primary" type="button" onClick={() => (isPlaying ? stopPlayback(false) : startPlayback())}>
-                    {isPlaying ? '停止' : '再生'}
-                  </button>
-                  <button className="secondary" type="button" onClick={() => stopPlayback(true)}>
-                    先頭へ
-                  </button>
-                  <div className="timecode">{formatTime(playhead)} / {formatTime(timelineDuration)}</div>
+            <section className="timeline-card">
+              <div className="timeline-header">
+                <div>
+                  <h2>タイムライン</h2>
+                  <p>端ドラッグで速度変更、Shift + 端ドラッグでトリム、右クリックで分割・結合・フェード・削除。</p>
+                  <p className="section-note">素材の追加はタイムラインに直接ドロップします。動画は Video レーン、音声は追加したい Audio レーンへ落としてください。動画は先頭基準のまま保持され、音声は同一トラック内で重ならないように配置されます。各トラックの一括 dB はクリップ群へまとめて反映されます。</p>
                 </div>
-              </section>
-
-              <section className="timeline-card">
-                <div className="timeline-header">
-                  <div>
-                    <h2>タイムライン</h2>
-                    <p>端ドラッグで速度変更、Shift + 端ドラッグでトリム、右クリックで分割・結合・フェード・削除。</p>
-                  </div>
-                  <button
-                    className="primary"
-                    type="button"
-                    onClick={() => void runExport()}
-                    disabled={busy || videoSources.length === 0 || videoClips.length === 0}
-                  >
-                    mp4 エクスポート
-                  </button>
-                </div>
-
-                <div
-                  className="timeline-scroll"
-                  onPointerDown={handleTimelinePointerDown}
-                  onPointerMove={handleTimelinePointerMove}
-                  onPointerUp={handleTimelinePointerEnd}
-                  onPointerCancel={handleTimelinePointerEnd}
+                <button
+                  className="primary"
+                  type="button"
+                  onClick={() => void runExport()}
+                  disabled={busy || videoSources.length === 0 || videoClips.length === 0}
                 >
-                  <div style={{ position: 'relative', width: timelineWidth }}>
-                    <div className="timeline-ruler">
-                      {Array.from({ length: Math.max(2, Math.ceil(timelineDuration) + 2) }).map((_, index) => (
-                        <div
-                          key={index}
-                          className="ruler-tick"
-                          style={{ left: index * PIXELS_PER_SECOND, width: PIXELS_PER_SECOND }}
-                        >
-                          {formatTime(index)}
-                        </div>
-                      ))}
-                      <div className="playhead" style={{ left: playhead * PIXELS_PER_SECOND }}>
-                        <div className="playhead-handle" />
+                  mp4 エクスポート
+                </button>
+              </div>
+
+              <div
+                className="timeline-scroll"
+                ref={timelineScrollRef}
+                onPointerDown={handleTimelinePointerDown}
+                onPointerMove={handleTimelinePointerMove}
+                onPointerUp={handleTimelinePointerEnd}
+                onPointerCancel={handleTimelinePointerEnd}
+              >
+                <div className="timeline-content" style={{ width: timelineWidth }}>
+                  <div className="timeline-ruler">
+                    {Array.from({ length: Math.max(2, timelineSeconds + 1) }).map((_, index) => (
+                      <div
+                        key={index}
+                        className="ruler-tick"
+                        style={{ left: index * pixelsPerSecond, width: pixelsPerSecond }}
+                      >
+                        {formatTime(index)}
                       </div>
+                    ))}
+                    <div className="playhead" style={{ left: playhead * pixelsPerSecond }}>
+                      <div className="playhead-handle" />
                     </div>
+                  </div>
 
-                    <div className="track-lane video-lane">
+                  <div
+                    className={`track-lane video-lane lane-drop-target ${dropTarget === 'video' ? 'lane-drop-active' : ''}`}
+                    onDragOver={handleVideoDragOver}
+                    onDragEnter={handleVideoDragEnter}
+                    onDragLeave={(event) => handleDragLeave(event, 'video')}
+                    onDrop={handleVideoDrop}
+                  >
+                    <div className="track-lane-inner">
                       <div className="lane-label">Video</div>
-                      <div className="playhead" style={{ left: playhead * PIXELS_PER_SECOND }} />
-                      {videoClips.map((clip) => (
-                        <div
-                          key={clip.id}
-                          className="clip-block video-clip"
-                          style={{ left: clip.timelineStart * PIXELS_PER_SECOND, width: Math.max(12, clipDuration(clip) * PIXELS_PER_SECOND) }}
-                          onPointerDown={(event) => handleClipPointerDown('video', clip.id, event)}
-                          onContextMenu={(event) => {
-                            event.preventDefault();
-                            setContextMenu({ clipId: clip.id, kind: 'video', x: event.clientX, y: event.clientY });
-                          }}
-                        >
-                          <div className="clip-handle" data-handle="start" />
-                          {renderClipLabel(clip)}
-                          <div className="clip-handle" data-handle="end" />
-                        </div>
-                      ))}
+                      <button className="lane-import-button" type="button" onClick={openVideoPicker}>動画を追加</button>
+                      {videoClips.length === 0 ? (
+                        <div className="lane-empty-state">ここに無音動画をドロップ</div>
+                      ) : null}
                     </div>
-
-                    {audioTracks.map((track) => (
-                      <div key={track.id} className="audio-track-block">
-                        <div className="audio-track-bar">
-                          <span className={`track-chip ${selectedTrackId === track.id ? 'active' : ''}`}>{track.name}</span>
-                          <label className="inline-field">
-                            <span>一括 dB</span>
-                            <input
-                              type="number"
-                              step={0.1}
-                              min={-60}
-                              max={12}
-                              value={bulkValues[track.id] ?? '0'}
-                              onChange={(event) => {
-                                const value = event.target.value;
-                                setBulkValues((current) => ({ ...current, [track.id]: value }));
-                              }}
-                            />
-                          </label>
-                          <button
-                            className="secondary"
-                            type="button"
-                            onClick={() => {
-                              const numeric = Number.parseFloat(bulkValues[track.id] ?? '0');
-                              if (!Number.isFinite(numeric)) return;
-                              setAudioTracks((tracks) => tracks.map((item) => {
-                                if (item.id !== track.id) return item;
-                                return { ...item, clips: applyTrackVolume(item.clips, numeric) };
-                              }));
-                            }}
-                          >
-                            一括適用
-                          </button>
-                        </div>
-
-                        <div className="track-lane audio-lane">
-                          <div className="lane-label">{track.name}</div>
-                          <div className="playhead" style={{ left: playhead * PIXELS_PER_SECOND }} />
-                          {track.clips.map((clip) => {
-                            const clipWidth = Math.max(12, clipDuration(clip) * PIXELS_PER_SECOND);
-                            return (
-                              <div
-                                key={clip.id}
-                                className="clip-block audio-clip"
-                                style={{ position: 'relative', left: clip.timelineStart * PIXELS_PER_SECOND, width: clipWidth }}
-                                onPointerDown={(event) => handleClipPointerDown('audio', clip.id, event, track.id)}
-                                onContextMenu={(event) => {
-                                  event.preventDefault();
-                                  setContextMenu({ clipId: clip.id, kind: 'audio', trackId: track.id, x: event.clientX, y: event.clientY });
-                                }}
-                              >
-                                {clip.rmsGraph && <RmsGraph rmsGraph={clip.rmsGraph} width={clipWidth} height={40} />}
-                                <div className="clip-handle" data-handle="start" />
-                                {renderClipLabel(clip)}
-                                <div className="clip-handle" data-handle="end" />
-                              </div>
-                            );
-                          })}
-                        </div>
+                    <div className="playhead" style={{ left: playhead * pixelsPerSecond }} />
+                    {videoClips.map((clip) => (
+                      <div
+                        key={clip.id}
+                        className="clip-block video-clip"
+                        style={{ left: clip.timelineStart * pixelsPerSecond, width: Math.max(12, clipDuration(clip) * pixelsPerSecond) }}
+                        onPointerDown={(event) => handleClipPointerDown('video', clip.id, event)}
+                        onContextMenu={(event) => {
+                          event.preventDefault();
+                          setContextMenu({ clipId: clip.id, kind: 'video', x: event.clientX, y: event.clientY });
+                        }}
+                      >
+                        <div className="clip-handle" data-handle="start" />
+                        {renderClipLabel(clip)}
+                        <div className="clip-handle" data-handle="end" />
                       </div>
                     ))}
                   </div>
-                </div>
-              </section>
-            </div>
-          </section>
 
-          <aside className="editor-pane right-pane">
-            <section className="log-card">
-              <h2>編集メモ</h2>
-              <ul className="plain-list">
-                <li>動画トラックは 0 秒開始を維持します。</li>
-                <li>音声はトラック内で重ならないように移動します。</li>
-                <li>端ドラッグで速度変更、Shift + 端ドラッグでトリミングします。</li>
-                <li>右クリックで再生ヘッド分割、結合、フェード、音量、削除を操作します。</li>
-                <li>音量はトラック単位で一括 dB 適用できます。</li>
-              </ul>
+                  {audioTracks.map((track) => (
+                    <div key={track.id} className="audio-track-block">
+                      <div className="audio-track-bar">
+                        <button
+                          className={`track-chip ${selectedTrackId === track.id ? 'active' : ''}`}
+                          type="button"
+                          onClick={() => setSelectedTrackId(track.id)}
+                        >
+                          {track.name}
+                        </button>
+                        <label className="inline-field">
+                          <span>一括 dB</span>
+                          <input
+                            type="number"
+                            step={0.1}
+                            min={-60}
+                            max={12}
+                            value={bulkValues[track.id] ?? '0'}
+                            onChange={(event) => {
+                              const value = event.target.value;
+                              setBulkValues((current) => ({ ...current, [track.id]: value }));
+                            }}
+                          />
+                        </label>
+                        <button
+                          className="secondary"
+                          type="button"
+                          onClick={() => {
+                            const numeric = Number.parseFloat(bulkValues[track.id] ?? '0');
+                            if (!Number.isFinite(numeric)) return;
+                            setAudioTracks((tracks) => tracks.map((item) => {
+                              if (item.id !== track.id) return item;
+                              return { ...item, clips: applyTrackVolume(item.clips, numeric) };
+                            }));
+                          }}
+                        >
+                          一括適用
+                        </button>
+                        <button
+                          className="secondary"
+                          type="button"
+                          onClick={addAudioTrack}
+                        >
+                          音声トラック追加
+                        </button>
+                        <button
+                          className="secondary"
+                          type="button"
+                          onClick={() => deleteAudioTrack(track.id)}
+                        >
+                          {track.name}削除
+                        </button>
+                      </div>
+
+                      <div
+                        className={`track-lane audio-lane lane-drop-target ${dropTarget === `audio:${track.id}` ? 'lane-drop-active' : ''}`}
+                        onDragOver={(event) => handleAudioDragOver(event, track.id)}
+                        onDragEnter={(event) => handleAudioDragEnter(event, track.id)}
+                        onDragLeave={(event) => handleDragLeave(event, `audio:${track.id}`)}
+                        onDrop={(event) => handleAudioDrop(event, track.id)}
+                      >
+                        <div className="track-lane-inner">
+                          <div className="lane-label">{track.name}</div>
+                          <button className="lane-import-button" type="button" onClick={() => openAudioPicker(track.id)}>音声を追加</button>
+                          {track.clips.length === 0 ? (
+                            <div className="lane-empty-state">ここに音声をドロップ</div>
+                          ) : null}
+                        </div>
+                        <div className="playhead" style={{ left: playhead * pixelsPerSecond }} />
+                        {track.clips.map((clip) => {
+                          const clipWidth = Math.max(12, clipDuration(clip) * pixelsPerSecond);
+                          return (
+                              <div
+                                key={clip.id}
+                                className="clip-block audio-clip"
+                                style={{ left: clip.timelineStart * pixelsPerSecond, width: clipWidth }}
+                                onPointerDown={(event) => handleClipPointerDown('audio', clip.id, event, track.id)}
+                                onContextMenu={(event) => {
+                                  event.preventDefault();
+                                setContextMenu({ clipId: clip.id, kind: 'audio', trackId: track.id, x: event.clientX, y: event.clientY });
+                              }}
+                            >
+                              {clip.rmsGraph && <RmsGraph rmsGraph={clip.rmsGraph} width={clipWidth} height={40} />}
+                              <div className="clip-handle" data-handle="start" />
+                              {renderClipLabel(clip)}
+                              <div className="clip-handle" data-handle="end" />
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </section>
 
             <section className="log-card">
               <h2>エクスポートログ</h2>
+              <p className="section-note">書き出し処理の進行状況と ffmpeg の出力を表示します。失敗時は最後の数行を見ると原因を追いやすくなります。</p>
               <div className="log-box">{exportLogs.length > 0 ? exportLogs.join('\n') : 'まだエクスポートしていません。'}</div>
             </section>
-          </aside>
-        </div>
+          </div>
+        </section>
       </section>
 
       <div hidden>
+        <input
+          ref={videoInputRef}
+          type="file"
+          accept="video/*"
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            if (file) {
+              void handleVideoFile(file);
+            }
+            event.currentTarget.value = '';
+          }}
+        />
+        <input
+          ref={audioInputRef}
+          type="file"
+          accept="audio/*"
+          multiple
+          onChange={(event) => {
+            const files = event.target.files;
+            if (files && files.length > 0) {
+              void handleAudioFiles(files, audioPickerTrackIdRef.current);
+            }
+            event.currentTarget.value = '';
+          }}
+        />
         {flattenedAudioClips.map((clip) => (
           <audio
             key={clip.id}

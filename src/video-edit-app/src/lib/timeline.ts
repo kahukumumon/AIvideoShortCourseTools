@@ -1,4 +1,4 @@
-﻿import type { AudioClip, BaseClip, ClipSegment, MediaKind, VideoClip } from '../types';
+import type { AudioClip, BaseClip, ClipSegment, MediaKind, VideoClip } from '../types';
 
 export const MIN_SPEED = 0.25;
 export const MAX_SPEED = 4;
@@ -14,15 +14,99 @@ export function roundTime(value: number) {
   return Math.round(value * 1000) / 1000;
 }
 
+function getTrimIn(clip: BaseClip) {
+  return roundTime(clip.trimIn ?? 0);
+}
+
+function getTrimOut(clip: BaseClip) {
+  return roundTime(clip.trimOut ?? 0);
+}
+
+function baseSegmentsForClip(clip: BaseClip): ClipSegment[] {
+  if (clip.segments && clip.segments.length > 0) {
+    return clip.segments.map((seg) => ({ ...seg }));
+  }
+  return [{
+    sourceId: clip.sourceId,
+    sourceStart: clip.sourceStart,
+    sourceDuration: clip.sourceDuration,
+    speed: 1,
+  }];
+}
+
+function segmentBasePlayDuration(seg: ClipSegment) {
+  return seg.sourceDuration / seg.speed;
+}
+
+function segmentPlayDuration(segs: ClipSegment[]) {
+  return roundTime(segs.reduce((sum, seg) => sum + segmentBasePlayDuration(seg), 0));
+}
+
+function trimSegmentsFromStart(segs: ClipSegment[], trimPlay: number): ClipSegment[] {
+  const result: ClipSegment[] = [];
+  let remaining = roundTime(trimPlay);
+  for (const seg of segs) {
+    const segPlay = segmentBasePlayDuration(seg);
+    if (remaining <= 0) {
+      result.push({ ...seg });
+      continue;
+    }
+    if (remaining >= segPlay - 1e-9) {
+      remaining = roundTime(remaining - segPlay);
+      continue;
+    }
+    const trimSource = roundTime(remaining * seg.speed);
+    result.push({
+      ...seg,
+      sourceStart: roundTime(seg.sourceStart + trimSource),
+      sourceDuration: roundTime(seg.sourceDuration - trimSource),
+    });
+    remaining = 0;
+  }
+  return result;
+}
+
+function trimSegmentsFromEnd(segs: ClipSegment[], trimPlay: number): ClipSegment[] {
+  const result = segs.map((seg) => ({ ...seg }));
+  let remaining = roundTime(trimPlay);
+  for (let i = result.length - 1; i >= 0 && remaining > 0; i -= 1) {
+    const seg = result[i];
+    const segPlay = segmentBasePlayDuration(seg);
+    if (remaining >= segPlay - 1e-9) {
+      remaining = roundTime(remaining - segPlay);
+      result.splice(i, 1);
+      continue;
+    }
+    const trimSource = roundTime(remaining * seg.speed);
+    result[i] = {
+      ...seg,
+      sourceDuration: roundTime(seg.sourceDuration - trimSource),
+    };
+    remaining = 0;
+  }
+  return result;
+}
+
+function fullBaseDuration(clip: BaseClip) {
+  return segmentPlayDuration(baseSegmentsForClip(clip));
+}
+
+export function getVisibleSegments(clip: BaseClip): ClipSegment[] {
+  const full = baseSegmentsForClip(clip);
+  const trimmedStart = trimSegmentsFromStart(full, getTrimIn(clip));
+  return trimSegmentsFromEnd(trimmedStart, getTrimOut(clip));
+}
+
+function visibleBaseDuration(clip: BaseClip) {
+  return roundTime(fullBaseDuration(clip) - getTrimIn(clip) - getTrimOut(clip));
+}
+
 /**
  * クリップの再生時間（秒）を返す。
- * segments を持つ結合クリップは各セグメントの再生時間の合計を使用する。
+ * trim は表示上の編集状態として保持し、実処理は再生/エクスポート時に解決する。
  */
 export function clipDuration(clip: BaseClip) {
-  if (clip.segments && clip.segments.length > 0) {
-    return roundTime(clip.segments.reduce((sum, seg) => sum + seg.sourceDuration / seg.speed, 0));
-  }
-  return roundTime(clip.sourceDuration / clip.speed);
+  return roundTime(visibleBaseDuration(clip) / clip.speed);
 }
 
 export function clipEnd(clip: BaseClip) {
@@ -87,100 +171,42 @@ export function moveClip<T extends BaseClip>(clips: T[], clipId: string, desired
   return normalizeClips(updated) as T[];
 }
 
-// ─── segments 操作ヘルパー (内部使用) ────────────────────────────
-
-/** segments の合計再生時間（秒） */
-function segmentPlayDuration(segs: ClipSegment[]): number {
-  return segs.reduce((sum, seg) => sum + seg.sourceDuration / seg.speed, 0);
-}
-
-/** 先頭から trimPlay 秒分を取り除いた segments を返す */
-function trimSegmentsFromStart(segs: ClipSegment[], trimPlay: number): ClipSegment[] {
-  const result: ClipSegment[] = [];
-  let remaining = trimPlay;
-  for (const seg of segs) {
-    const segPlay = seg.sourceDuration / seg.speed;
-    if (remaining <= 0) {
-      result.push(seg);
-    } else if (remaining >= segPlay - 1e-9) {
-      remaining -= segPlay;
-      // このセグメントは丸ごとスキップ
-    } else {
-      const trimSource = roundTime(remaining * seg.speed);
-      result.push({
-        ...seg,
-        sourceStart: roundTime(seg.sourceStart + trimSource),
-        sourceDuration: roundTime(seg.sourceDuration - trimSource),
-      });
-      remaining = 0;
-    }
-  }
-  return result;
-}
-
-/** 末尾から trimPlay 秒分を取り除いた segments を返す */
-function trimSegmentsFromEnd(segs: ClipSegment[], trimPlay: number): ClipSegment[] {
-  const result: ClipSegment[] = [...segs];
-  let remaining = trimPlay;
-  for (let i = result.length - 1; i >= 0 && remaining > 0; i--) {
-    const seg = result[i];
-    const segPlay = seg.sourceDuration / seg.speed;
-    if (remaining >= segPlay - 1e-9) {
-      remaining -= segPlay;
-      result.splice(i, 1);
-    } else {
-      const trimSource = roundTime(remaining * seg.speed);
-      result[i] = { ...seg, sourceDuration: roundTime(seg.sourceDuration - trimSource) };
-      remaining = 0;
-    }
-  }
-  return result;
-}
-
-// ─── resolveSegmentAtPlaytime ─────────────────────────────────────
-
-/** resolveSegmentAtPlaytime の戻り値型 */
 export interface SegmentResolution {
-  /** アクティブなセグメント（非 segments クリップは合成値） */
   seg: ClipSegment;
-  /** segments 配列のインデックス。非 segments クリップは -1 */
   segIdx: number;
-  /** 当該セグメント内での再生経過時間（秒） */
   segLocalTime: number;
+  effectiveSpeed: number;
 }
 
 /**
- * クリップ先頭からの localTime 秒時点でアクティブなセグメントと再生位置を解決する。
- * 非 segments クリップはクリップフィールドを合成して返す。
+ * localTime はタイムライン上のクリップ内時刻。
+ * trim と clip.speed を解決し、実ソース位置へ変換する。
  */
 export function resolveSegmentAtPlaytime(clip: BaseClip, localTime: number): SegmentResolution {
-  if (!clip.segments || clip.segments.length === 0) {
-    return {
-      seg: {
-        sourceId: clip.sourceId,
-        sourceStart: clip.sourceStart,
-        sourceDuration: clip.sourceDuration,
-        speed: clip.speed,
-      },
-      segIdx: -1,
-      segLocalTime: Math.max(0, localTime),
-    };
-  }
+  const segs = baseSegmentsForClip(clip);
+  const baseTime = roundTime(getTrimIn(clip) + Math.max(0, localTime) * clip.speed);
   let accumulated = 0;
-  for (let i = 0; i < clip.segments.length; i++) {
-    const seg = clip.segments[i];
-    const segPlay = seg.sourceDuration / seg.speed;
-    if (localTime < accumulated + segPlay || i === clip.segments.length - 1) {
-      return { seg, segIdx: i, segLocalTime: Math.max(0, localTime - accumulated) };
+  for (let i = 0; i < segs.length; i += 1) {
+    const seg = segs[i];
+    const segPlay = segmentBasePlayDuration(seg);
+    if (baseTime < accumulated + segPlay || i === segs.length - 1) {
+      return {
+        seg,
+        segIdx: clip.segments && clip.segments.length > 0 ? i : -1,
+        segLocalTime: Math.max(0, baseTime - accumulated),
+        effectiveSpeed: roundTime(seg.speed * clip.speed),
+      };
     }
-    accumulated += segPlay;
+    accumulated = roundTime(accumulated + segPlay);
   }
-  // フォールバック（到達しないはず）
-  const last = clip.segments[clip.segments.length - 1];
-  return { seg: last, segIdx: clip.segments.length - 1, segLocalTime: 0 };
+  const last = segs[segs.length - 1];
+  return {
+    seg: last,
+    segIdx: clip.segments && clip.segments.length > 0 ? segs.length - 1 : -1,
+    segLocalTime: 0,
+    effectiveSpeed: roundTime(last.speed * clip.speed),
+  };
 }
-
-// ─── trimClip ────────────────────────────────────────────────────
 
 export function trimClip<T extends BaseClip>(clips: T[], clipId: string, side: 'start' | 'end', desiredEdge: number, kind: MediaKind) {
   const current = getClipById(clips, clipId);
@@ -188,69 +214,36 @@ export function trimClip<T extends BaseClip>(clips: T[], clipId: string, side: '
   const start = current.timelineStart;
   const end = clipEnd(current);
   const { previousEnd, nextStart } = getNeighborBounds(clips, clipId);
+  const currentTrimIn = getTrimIn(current);
+  const currentTrimOut = getTrimOut(current);
+  const fullDuration = fullBaseDuration(current);
 
-  let nextClip: T = current;
+  let nextClip = current;
 
-  if (current.segments && current.segments.length > 0) {
-    // ── segments クリップ: segments 配列を直接操作 ──
-    const segs = current.segments;
-    if (side === 'start') {
-      // 結合クリップは前方トリムのみ可（ソース素材が start より前にない）
-      const minimumStart = Math.max(kind === 'video' ? 0 : previousEnd, start);
-      const edge = clamp(desiredEdge, minimumStart, end - MIN_TIMELINE_SECONDS);
-      const trimPlay = roundTime(edge - start);
-      if (trimPlay <= 0) return clips;
-      const newSegs = trimSegmentsFromStart(segs, trimPlay);
-      if (newSegs.length === 0) return clips;
-      const newPlayDuration = roundTime(segmentPlayDuration(newSegs));
-      nextClip = {
-        ...current,
-        timelineStart: roundTime(edge),
-        sourceStart: 0,
-        sourceDuration: roundTime(newPlayDuration * current.speed),
-        sourceMaxDuration: roundTime(newPlayDuration * current.speed),
-        segments: newSegs,
-      } as T;
-    } else {
-      // 結合クリップは後方トリムのみ可（延長不可）
-      const maximumEnd = Math.min(nextStart, end);
-      const edge = clamp(desiredEdge, start + MIN_TIMELINE_SECONDS, maximumEnd);
-      const trimPlay = roundTime(end - edge);
-      if (trimPlay <= 0) return clips;
-      const newSegs = trimSegmentsFromEnd(segs, trimPlay);
-      if (newSegs.length === 0) return clips;
-      const newPlayDuration = roundTime(segmentPlayDuration(newSegs));
-      nextClip = {
-        ...current,
-        sourceDuration: roundTime(newPlayDuration * current.speed),
-        sourceMaxDuration: roundTime(newPlayDuration * current.speed),
-        segments: newSegs,
-      } as T;
-    }
+  if (side === 'start') {
+    const minimumStart = Math.max(kind === 'video' ? 0 : previousEnd, start - currentTrimIn / current.speed);
+    const edge = clamp(desiredEdge, minimumStart, end - MIN_TIMELINE_SECONDS);
+    const deltaTimeline = roundTime(edge - start);
+    nextClip = {
+      ...current,
+      timelineStart: roundTime(edge),
+      trimIn: roundTime(currentTrimIn + deltaTimeline * current.speed),
+    } as T;
   } else {
-    // ── 通常クリップ: 既存ロジック ──
-    if (side === 'start') {
-      const minimumStart = Math.max(kind === 'video' ? 0 : previousEnd, start - current.sourceStart / current.speed);
-      const edge = clamp(desiredEdge, minimumStart, end - MIN_TIMELINE_SECONDS);
-      const deltaTimeline = edge - start;
-      const deltaSource = deltaTimeline * current.speed;
-      nextClip = {
-        ...current,
-        timelineStart: roundTime(edge),
-        sourceStart: roundTime(current.sourceStart + deltaSource),
-        sourceDuration: roundTime(current.sourceDuration - deltaSource),
-      } as T;
-    } else {
-      const maximumEnd = Math.min(nextStart, start + (current.sourceMaxDuration - current.sourceStart) / current.speed);
-      const edge = clamp(desiredEdge, start + MIN_TIMELINE_SECONDS, maximumEnd);
-      const deltaTimeline = edge - end;
-      const deltaSource = deltaTimeline * current.speed;
-      nextClip = {
-        ...current,
-        sourceDuration: roundTime(current.sourceDuration + deltaSource),
-      } as T;
-    }
+    const maximumEnd = Math.min(nextStart, end + currentTrimOut / current.speed);
+    const edge = clamp(desiredEdge, start + MIN_TIMELINE_SECONDS, maximumEnd);
+    const nextTrimOut = roundTime(currentTrimOut + (end - edge) * current.speed);
+    nextClip = {
+      ...current,
+      trimOut: clamp(nextTrimOut, 0, fullDuration),
+    } as T;
   }
+
+  nextClip = {
+    ...nextClip,
+    trimIn: clamp(getTrimIn(nextClip), 0, fullDuration - MIN_TIMELINE_SECONDS * nextClip.speed),
+    trimOut: clamp(getTrimOut(nextClip), 0, fullDuration - getTrimIn(nextClip) - MIN_TIMELINE_SECONDS * nextClip.speed),
+  } as T;
 
   nextClip = {
     ...nextClip,
@@ -261,13 +254,12 @@ export function trimClip<T extends BaseClip>(clips: T[], clipId: string, side: '
   return normalizeClips(clips.map((clip) => (clip.id === clipId ? nextClip : clip))) as T[];
 }
 
-// ─── changeClipSpeed ──────────────────────────────────────────────
-
 export function changeClipSpeed<T extends BaseClip>(clips: T[], clipId: string, side: 'start' | 'end', desiredEdge: number, kind: MediaKind) {
   const current = getClipById(clips, clipId);
   if (!current) return clips;
   const start = current.timelineStart;
   const end = clipEnd(current);
+  const baseDuration = visibleBaseDuration(current);
   const { previousEnd, nextStart } = getNeighborBounds(clips, clipId);
   const minStart = kind === 'video' ? 0 : previousEnd;
   let updated = current;
@@ -275,29 +267,13 @@ export function changeClipSpeed<T extends BaseClip>(clips: T[], clipId: string, 
   if (side === 'end') {
     const boundedEnd = clamp(desiredEdge, start + MIN_TIMELINE_SECONDS, nextStart);
     const duration = boundedEnd - start;
-    const speed = clamp(roundTime(current.sourceDuration / duration), MIN_SPEED, MAX_SPEED);
+    const speed = clamp(roundTime(baseDuration / duration), MIN_SPEED, MAX_SPEED);
     updated = { ...current, speed } as T;
   } else {
     const boundedStart = clamp(desiredEdge, minStart, end - MIN_TIMELINE_SECONDS);
     const duration = end - boundedStart;
-    const speed = clamp(roundTime(current.sourceDuration / duration), MIN_SPEED, MAX_SPEED);
-    updated = { ...current, timelineStart: roundTime(end - current.sourceDuration / speed), speed } as T;
-  }
-
-  // segments クリップ: 各セグメント速度を比例更新し、sourceDuration を同期
-  if (updated.segments && updated.segments.length > 0 && current.speed > 0) {
-    const factor = updated.speed / current.speed;
-    const scaledSegs = updated.segments.map((seg) => ({
-      ...seg,
-      speed: clamp(roundTime(seg.speed * factor), MIN_SPEED, MAX_SPEED),
-    }));
-    const actualPlayDuration = roundTime(segmentPlayDuration(scaledSegs));
-    updated = {
-      ...updated,
-      segments: scaledSegs,
-      sourceDuration: roundTime(actualPlayDuration * updated.speed),
-      sourceMaxDuration: roundTime(actualPlayDuration * updated.speed),
-    } as T;
+    const speed = clamp(roundTime(baseDuration / duration), MIN_SPEED, MAX_SPEED);
+    updated = { ...current, timelineStart: roundTime(end - baseDuration / speed), speed } as T;
   }
 
   updated = {
@@ -309,72 +285,36 @@ export function changeClipSpeed<T extends BaseClip>(clips: T[], clipId: string, 
   return normalizeClips(clips.map((clip) => (clip.id === clipId ? updated : clip))) as T[];
 }
 
-// ─── splitClip ───────────────────────────────────────────────────
-
 export function splitClip<T extends BaseClip>(clips: T[], clipId: string, playhead: number) {
   const current = getClipById(clips, clipId);
   if (!current) return clips;
-  const localStart = playhead - current.timelineStart;
+  const localStart = roundTime(playhead - current.timelineStart);
   const duration = clipDuration(current);
   if (localStart <= MIN_TIMELINE_SECONDS || duration - localStart <= MIN_TIMELINE_SECONDS) {
     return clips;
   }
 
-  if (current.segments && current.segments.length > 0) {
-    // ── segments クリップ: playhead でセグメント配列を左右に分割 ──
-    const leftSegs = trimSegmentsFromEnd(current.segments, roundTime(duration - localStart));
-    const rightSegs = trimSegmentsFromStart(current.segments, roundTime(localStart));
-    if (leftSegs.length === 0 || rightSegs.length === 0) return clips;
+  const splitBase = roundTime(getTrimIn(current) + localStart * current.speed);
+  const fullDuration = fullBaseDuration(current);
 
-    const leftPlayDuration = roundTime(segmentPlayDuration(leftSegs));
-    const rightPlayDuration = roundTime(segmentPlayDuration(rightSegs));
-
-    const left = {
-      ...current,
-      segments: leftSegs,
-      sourceDuration: roundTime(leftPlayDuration * current.speed),
-      sourceMaxDuration: roundTime(leftPlayDuration * current.speed),
-      fadeIn: clampFade(current.fadeIn, { ...current, sourceDuration: roundTime(leftPlayDuration * current.speed) }),
-      fadeOut: 0,
-    };
-    const right = {
-      ...current,
-      id: crypto.randomUUID(),
-      timelineStart: roundTime(playhead),
-      sourceStart: 0,
-      segments: rightSegs,
-      sourceDuration: roundTime(rightPlayDuration * current.speed),
-      sourceMaxDuration: roundTime(rightPlayDuration * current.speed),
-      fadeIn: 0,
-      fadeOut: clampFade(current.fadeOut, { ...current, sourceDuration: roundTime(rightPlayDuration * current.speed) }),
-    };
-
-    return normalizeClips(clips.flatMap((clip) => (clip.id === clipId ? [left as T, right as T] : [clip]))) as T[];
-  }
-
-  // ── 通常クリップ: 既存ロジック ──
-  const leftSourceDuration = roundTime(localStart * current.speed);
-  const rightSourceDuration = roundTime(current.sourceDuration - leftSourceDuration);
   const left = {
     ...current,
-    sourceDuration: leftSourceDuration,
-    fadeIn: clampFade(current.fadeIn, { ...current, sourceDuration: leftSourceDuration }),
+    trimOut: roundTime(fullDuration - splitBase),
+    fadeIn: clampFade(current.fadeIn, { ...current, trimOut: roundTime(fullDuration - splitBase) }),
     fadeOut: 0,
   };
+
   const right = {
     ...current,
     id: crypto.randomUUID(),
     timelineStart: roundTime(playhead),
-    sourceStart: roundTime(current.sourceStart + leftSourceDuration),
-    sourceDuration: rightSourceDuration,
+    trimIn: splitBase,
     fadeIn: 0,
-    fadeOut: clampFade(current.fadeOut, { ...current, sourceDuration: rightSourceDuration }),
+    fadeOut: clampFade(current.fadeOut, { ...current, trimIn: splitBase }),
   };
 
   return normalizeClips(clips.flatMap((clip) => (clip.id === clipId ? [left as T, right as T] : [clip]))) as T[];
 }
-
-// ─── その他ユーティリティ ─────────────────────────────────────────
 
 export function mergeEditableValue<T extends number>(left: T, right: T, defaultValue: T) {
   if (left === defaultValue) return right;
@@ -382,31 +322,22 @@ export function mergeEditableValue<T extends number>(left: T, right: T, defaultV
   return left;
 }
 
-// クリップのソースセグメントリストを返す（結合クリップはsegments、単一クリップは単要素配列）
-function getClipSegments(clip: BaseClip): ClipSegment[] {
-  if (clip.segments && clip.segments.length > 0) return clip.segments;
-  return [{
-    sourceId: clip.sourceId,
-    sourceStart: clip.sourceStart,
-    sourceDuration: clip.sourceDuration,
-    speed: clip.speed,
-  }];
+function getVisibleSegmentsWithClipSpeed(clip: BaseClip): ClipSegment[] {
+  return getVisibleSegments(clip).map((seg) => ({
+    ...seg,
+    speed: roundTime(seg.speed * clip.speed),
+  }));
 }
 
 /**
- * 結合可否判定。仕様：同一トラック内で隣接している同種クリップのみ結合可能。
- * sourceId・speed・ソース連続性は制約に含まない。
+ * 結合処理。
+ * 再生結果を保つため、各クリップの可視区間を segments 化して保持する。
  */
 export function canJoinPair<T extends BaseClip>(left: T, right: T) {
   if (left.kind !== right.kind) return false;
   return Math.abs(clipEnd(left) - right.timelineStart) <= 0.02;
 }
 
-/**
- * 結合処理。
- * - speed/fadeIn/fadeOut/volumeDb: どちらか一方が標準値ならもう一方、両方変更値なら時間的に早い方（left）を採用
- * - 結合クリップはセグメントリストを保持し、エクスポート・プレビューで正確に再生できる
- */
 export function joinClipWithNext<T extends BaseClip>(clips: T[], clipId: string) {
   const sorted = normalizeClips(clips);
   const index = sorted.findIndex((clip) => clip.id === clipId);
@@ -415,18 +346,21 @@ export function joinClipWithNext<T extends BaseClip>(clips: T[], clipId: string)
   const right = sorted[index + 1];
   if (!canJoinPair(left, right)) return clips;
 
-  const leftSegs = getClipSegments(left);
-  const rightSegs = getClipSegments(right);
-  const totalPlayDuration = roundTime(clipDuration(left) + clipDuration(right));
   const mergedSpeed = mergeEditableValue(left.speed, right.speed, 1 as number);
-  const mergedSourceDuration = roundTime(totalPlayDuration * mergedSpeed);
+  const leftSegs = getVisibleSegmentsWithClipSpeed(left).map((seg) => ({ ...seg, speed: seg.speed / mergedSpeed }));
+  const rightSegs = getVisibleSegmentsWithClipSpeed(right).map((seg) => ({ ...seg, speed: seg.speed / mergedSpeed }));
+  const mergedBaseDuration = roundTime(
+    [...leftSegs, ...rightSegs].reduce((sum, seg) => sum + seg.sourceDuration / seg.speed, 0),
+  );
 
   const mergedBase = {
     ...left,
     sourceStart: 0,
-    sourceDuration: mergedSourceDuration,
-    sourceMaxDuration: mergedSourceDuration,
+    sourceDuration: roundTime(mergedBaseDuration),
+    sourceMaxDuration: roundTime(mergedBaseDuration),
     speed: mergedSpeed,
+    trimIn: 0,
+    trimOut: 0,
     segments: [...leftSegs, ...rightSegs],
     fadeIn: mergeEditableValue(left.fadeIn, right.fadeIn, 0 as number),
     fadeOut: mergeEditableValue(left.fadeOut, right.fadeOut, 0 as number),
@@ -453,9 +387,8 @@ export function applyTrackVolume(clips: AudioClip[], volumeDb: number) {
 }
 
 export function totalTimelineDuration(videoClips: VideoClip[], audioClips: AudioClip[]) {
-  return Math.max(
-    0,
-    ...videoClips.map((clip) => clipEnd(clip)),
-    ...audioClips.map((clip) => clipEnd(clip)),
-  );
+  if (videoClips.length > 0) {
+    return Math.max(0, ...videoClips.map((clip) => clipEnd(clip)));
+  }
+  return Math.max(0, ...audioClips.map((clip) => clipEnd(clip)));
 }

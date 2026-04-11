@@ -21,12 +21,6 @@
   width: min(360px, 100%);
 }
 
-.editor-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.5fr) minmax(280px, 0.7fr);
-  gap: 18px;
-}
-
 .editor-pane {
   min-width: 0;
 }
@@ -71,6 +65,7 @@
   align-content: start;
 }
 
+.info-card,
 .preview-card,
 .timeline-card,
 .log-card {
@@ -80,6 +75,12 @@
   border: 1px solid rgba(67, 50, 32, 0.12);
   background: rgba(255, 251, 245, 0.95);
   padding: 18px;
+}
+
+.section-note {
+  margin: 0 0 14px;
+  color: var(--muted);
+  line-height: 1.7;
 }
 
 .preview-frame {
@@ -145,16 +146,23 @@
 }
 
 .timeline-scroll {
-  overflow-x: auto;
+  overflow: auto;
   padding-bottom: 4px;
   margin-top: 16px;
-  cursor: ew-resize;
+  cursor: default;
+  max-height: min(72vh, 960px);
+}
+
+.timeline-content {
+  position: relative;
+  min-width: 100%;
 }
 
 .timeline-ruler,
 .track-lane {
   position: relative;
   min-height: 56px;
+  cursor: ew-resize;
 }
 
 .timeline-ruler {
@@ -176,7 +184,7 @@
 .playhead {
   position: absolute;
   top: 0;
-  bottom: -100vh;
+  bottom: 0;
   width: 2px;
   background: #bf5527;
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.8);
@@ -204,6 +212,39 @@
   border: 1px solid rgba(67, 50, 32, 0.12);
   min-height: 72px;
   margin-top: 10px;
+}
+
+.track-lane-inner {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+}
+
+.lane-drop-target {
+  transition: border-color 120ms ease, box-shadow 120ms ease, background-color 120ms ease;
+}
+
+.lane-drop-active {
+  border-color: rgba(191, 85, 39, 0.56);
+  box-shadow: 0 0 0 3px rgba(191, 85, 39, 0.14);
+}
+
+.lane-import-button {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  z-index: 1;
+}
+
+.lane-empty-state {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 16px 96px 12px;
+  color: var(--muted);
+  font-size: 0.92rem;
+  pointer-events: none;
 }
 
 .audio-track-block + .audio-track-block {
@@ -239,6 +280,7 @@
   overflow: hidden;
   box-shadow: 0 8px 20px rgba(72, 48, 23, 0.14);
   cursor: grab;
+  z-index: 2;
 }
 
 .clip-block:active {
@@ -263,6 +305,7 @@
 .clip-label {
   min-width: 0;
   display: grid;
+  flex: 1 1 auto;
   padding: 6px 10px;
   text-align: left;
   font-size: 0.82rem;
@@ -270,6 +313,15 @@
   position: relative;
   z-index: 1;
   text-shadow: 0 1px 2px rgba(4, 10, 18, 0.8);
+  overflow: hidden;
+}
+
+.clip-label > span,
+.clip-label > small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .clip-label small {
@@ -277,16 +329,22 @@
 }
 
 .clip-handle {
+  flex: 0 0 10px;
   width: 10px;
   background: rgba(255, 255, 255, 0.28);
   cursor: ew-resize;
+  position: relative;
+  z-index: 2;
 }
 
 .track-chip {
+  appearance: none;
   border: 1px solid rgba(67, 50, 32, 0.14);
   border-radius: 999px;
   background: rgba(255, 248, 241, 0.9);
   padding: 10px 16px;
+  cursor: pointer;
+  font: inherit;
 }
 
 .track-chip.active {
@@ -306,13 +364,6 @@
 
 .small-field {
   min-width: 170px;
-}
-
-.plain-list {
-  margin: 0;
-  padding-left: 18px;
-  color: var(--muted);
-  line-height: 1.8;
 }
 
 .log-box {
@@ -349,10 +400,6 @@
 }
 
 @media (max-width: 1080px) {
-  .editor-grid {
-    grid-template-columns: 1fr;
-  }
-
   .player-controls {
     grid-template-columns: repeat(2, auto) 1fr;
   }

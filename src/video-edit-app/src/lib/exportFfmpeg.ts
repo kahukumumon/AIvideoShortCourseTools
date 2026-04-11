@@ -2,8 +2,8 @@
 import { fetchFile } from '@ffmpeg/util';
 import coreURL from '@ffmpeg/core?url';
 import wasmURL from '@ffmpeg/core/wasm?url';
-import type { AudioTrack, ClipSegment, ExportProgress, MediaSourceItem, VideoClip } from '../types';
-import { clipDuration, dbToGain, totalTimelineDuration } from './timeline';
+import type { AudioTrack, BaseClip, ClipSegment, ExportProgress, MediaSourceItem, VideoClip } from '../types';
+import { clipDuration, dbToGain, getVisibleSegments, totalTimelineDuration } from './timeline';
 
 let ffmpegPromise: Promise<FFmpeg> | null = null;
 
@@ -63,9 +63,11 @@ function getSourcePath(sourceId: string, sourceMap: Map<string, MediaSourceItem>
   return `inputs/${source.id}_${sanitizeFileName(source.name.replace(ext, ''))}${ext}`;
 }
 
-function clipToSegments(clip: { sourceId: string; sourceStart: number; sourceDuration: number; speed: number; segments?: ClipSegment[] }): ClipSegment[] {
-  if (clip.segments && clip.segments.length > 0) return clip.segments;
-  return [{ sourceId: clip.sourceId, sourceStart: clip.sourceStart, sourceDuration: clip.sourceDuration, speed: clip.speed }];
+function clipToSegments(clip: BaseClip): ClipSegment[] {
+  return getVisibleSegments(clip).map((seg) => ({
+    ...seg,
+    speed: seg.speed * clip.speed,
+  }));
 }
 
 function unknownErrorMessage(error: unknown) {
@@ -210,7 +212,7 @@ export async function exportTimelineToMp4(options: {
 
   filters.push(`${videoLabels.join('')}concat=n=${videoLabels.length}:v=1:a=0[vout]`);
   if (audioLabels.length > 0) {
-    filters.push(`${audioLabels.join('')}amix=inputs=${audioLabels.length}:normalize=0:dropout_transition=0[aout]`);
+    filters.push(`${audioLabels.join('')}amix=inputs=${audioLabels.length}:normalize=0:dropout_transition=0,atrim=duration=${duration}[aout]`);
   } else {
     filters.push(`anullsrc=r=48000:cl=stereo,atrim=duration=${duration}[aout]`);
   }
@@ -261,4 +263,3 @@ export async function exportTimelineToMp4(options: {
   const data = await ffmpeg.readFile('output.mp4');
   return new Blob([data], { type: 'video/mp4' });
 }
-

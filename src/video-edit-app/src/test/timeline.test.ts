@@ -1,5 +1,5 @@
 ﻿import { describe, expect, it } from 'vitest';
-import { applyTrackVolume, canJoinPair, changeClipSpeed, clipDuration, clipEnd, joinClipWithNext, moveClip, resolveSegmentAtPlaytime, splitClip, trimClip } from '../lib/timeline';
+import { applyTrackVolume, canJoinPair, changeClipSpeed, clipDuration, clipEnd, joinClipWithNext, moveClip, resolveSegmentAtPlaytime, splitClip, totalTimelineDuration, trimClip } from '../lib/timeline';
 import type { AudioClip, VideoClip } from '../types';
 
 const videoA: VideoClip = {
@@ -192,17 +192,15 @@ describe('joinClipWithNext: 異なる source の結合', () => {
   });
 });
 
-describe('changeClipSpeed: セグメント速度の比例更新', () => {
-  it('結合クリップの速度変更時に各セグメントの速度も比例して更新される', () => {
-    // まず 2 クリップを結合して merged speed=1 の segmented clip を作る
+describe('changeClipSpeed: 非破壊編集', () => {
+  it('結合クリップの速度変更時に segments 自体は維持される', () => {
     const joined = joinClipWithNext([audioA, audioB], 'a1');
     expect(joined[0].segments).toHaveLength(2);
-    // 速度を 2 に変更
     const sped = changeClipSpeed(joined as AudioClip[], joined[0].id, 'end', clipDuration(joined[0]) / 2, 'audio');
     const segs = sped[0].segments!;
-    // 全セグメントが factor=2 倍の速度になること
-    expect(segs[0].speed).toBe(2);
-    expect(segs[1].speed).toBe(2);
+    expect(sped[0].speed).toBe(2);
+    expect(segs[0].speed).toBe(1);
+    expect(segs[1].speed).toBe(1);
   });
 });
 
@@ -265,57 +263,63 @@ describe('resolveSegmentAtPlaytime', () => {
 // ─── trimClip: segments クリップのトリミング ─────────────────────────────────
 
 describe('trimClip: segments サポート', () => {
-  it('先頭トリム: 先頭セグメントの先頭を削る', () => {
+  it('先頭トリム: trimIn を増やして非破壊で短くする', () => {
     const joined = joinClipWithNext([audioA, audioB], 'a1')[0] as AudioClip;
-    // 8s クリップ: t=2 にトリム (先頭 2s を削除)
     const result = trimClip([joined], joined.id, 'start', 2, 'audio') as AudioClip[];
     expect(result[0].timelineStart).toBe(2);
     expect(clipDuration(result[0])).toBeCloseTo(6, 3);
-    const segs = result[0].segments!;
-    expect(segs).toHaveLength(2);
-    expect(segs[0].sourceStart).toBe(2); // 2s * speed1 = 2
-    expect(segs[0].sourceDuration).toBe(2);
+    expect(result[0].trimIn).toBe(2);
+    expect(result[0].segments).toHaveLength(2);
   });
 
-  it('先頭トリム: 先頭セグメント全体を超えるトリムは先頭セグメントを削除する', () => {
+  it('先頭トリム: セグメント境界をまたいでも segments 自体は保持する', () => {
     const joined = joinClipWithNext([audioA, audioB], 'a1')[0] as AudioClip;
     const result = trimClip([joined], joined.id, 'start', 4.5, 'audio') as AudioClip[];
-    const segs = result[0].segments!;
-    expect(segs).toHaveLength(1);
     expect(result[0].timelineStart).toBe(4.5);
     expect(clipDuration(result[0])).toBeCloseTo(3.5, 3);
+    expect(result[0].trimIn).toBe(4.5);
+    expect(result[0].segments).toHaveLength(2);
   });
 
-  it('末尾トリム: 最後セグメントの末尾を削る', () => {
+  it('末尾トリム: trimOut を増やして非破壊で短くする', () => {
     const joined = joinClipWithNext([audioA, audioB], 'a1')[0] as AudioClip;
-    // 8s クリップ: t=6 にトリム (末尾 2s を削除)
     const result = trimClip([joined], joined.id, 'end', 6, 'audio') as AudioClip[];
     expect(clipDuration(result[0])).toBeCloseTo(6, 3);
-    const segs = result[0].segments!;
-    expect(segs).toHaveLength(2);
-    expect(segs[segs.length - 1].sourceDuration).toBe(2);
+    expect(result[0].trimOut).toBe(2);
+    expect(result[0].segments).toHaveLength(2);
   });
 
-  it('末尾トリム: 最後セグメント全体を超えるトリムは最後セグメントを削除する', () => {
+  it('末尾トリム: セグメント境界をまたいでも segments 自体は保持する', () => {
     const joined = joinClipWithNext([audioA, audioB], 'a1')[0] as AudioClip;
     const result = trimClip([joined], joined.id, 'end', 3.5, 'audio') as AudioClip[];
-    expect(result[0].segments!).toHaveLength(1);
     expect(clipDuration(result[0])).toBeCloseTo(3.5, 3);
+    expect(result[0].trimOut).toBe(4.5);
+    expect(result[0].segments).toHaveLength(2);
+  });
+
+  it('先頭トリムは元に戻せる', () => {
+    const joined = joinClipWithNext([audioA, audioB], 'a1')[0] as AudioClip;
+    const trimmed = trimClip([joined], joined.id, 'start', 2, 'audio') as AudioClip[];
+    const restored = trimClip(trimmed, joined.id, 'start', 0, 'audio') as AudioClip[];
+    expect(restored[0].timelineStart).toBe(0);
+    expect(clipDuration(restored[0])).toBe(8);
+    expect(restored[0].trimIn ?? 0).toBe(0);
   });
 });
 
 // ─── splitClip: segments クリップの分割 ────────────────────────────────
 
 describe('splitClip: segments サポート', () => {
-  it('先頭セグメント内で分割: 左に 1 セグ、右に 2 セグ', () => {
+  it('先頭セグメント内で分割: trim だけを分けて可視範囲を分割する', () => {
     const joined = joinClipWithNext([audioA, audioB], 'a1')[0] as AudioClip;
     const result = splitClip([joined], joined.id, 2) as AudioClip[];
     expect(result).toHaveLength(2);
     expect(clipDuration(result[0])).toBeCloseTo(2, 3);
     expect(clipDuration(result[1])).toBeCloseTo(6, 3);
     expect(result[1].timelineStart).toBe(2);
-    expect(result[0].segments!).toHaveLength(1);
+    expect(result[0].trimOut).toBe(6);
     expect(result[1].segments!).toHaveLength(2);
+    expect(result[1].trimIn).toBe(2);
   });
 
   it('セグメント境界で分割: 左右それぞれ 1 セグ', () => {
@@ -326,16 +330,14 @@ describe('splitClip: segments サポート', () => {
     expect(clipDuration(result[1])).toBeCloseTo(4, 3);
   });
 
-  it('2 番目セグメント内で分割: 右に別ソースの単一セグ', () => {
+  it('2 番目セグメント内で分割: 右側は trimIn で開始位置を表す', () => {
     const audioDiff: AudioClip = { ...audioA, id: 'diff', sourceId: 'src-b', timelineStart: 4, sourceStart: 0 };
     const joined = joinClipWithNext([audioA, audioDiff], 'a1')[0] as AudioClip;
-    // t=5 で分割 (2 番目セグの 1s 目)
     const result = splitClip([joined], joined.id, 5) as AudioClip[];
     expect(result).toHaveLength(2);
     const right = result[1];
-    expect(right.segments!).toHaveLength(1);
-    expect(right.segments![0].sourceId).toBe('src-b');
-    expect(right.segments![0].sourceStart).toBe(1); // 1s trimmed from front of seg2
+    expect(right.segments!).toHaveLength(2);
+    expect(right.trimIn).toBe(5);
   });
 
   it('分割後の左右の clipDuration の合計は元の合計と一致する', () => {
@@ -373,11 +375,8 @@ describe('複数動画クリップの重複禁止ロジック', () => {
       { ...audioA, id: 'a1', timelineStart: 0, sourceDuration: 5 },
     ];
     
-    // 複数動画 + 音声から全期間を計算できること
-    const duration = Math.max(
-      clips.length > 0 ? Math.max(...clips.map(clipEnd)) : 0,
-      allAudioClips.length > 0 ? Math.max(...allAudioClips.map(clipEnd)) : 0
-    );
+    // 動画がある場合は音声が長くても動画尺を全体尺として扱う
+    const duration = totalTimelineDuration(clips, allAudioClips);
     expect(duration).toBe(9);
   });
 

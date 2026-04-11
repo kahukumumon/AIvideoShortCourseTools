@@ -28,6 +28,8 @@ export interface BaseClip {
   sourceDuration: number;
   sourceMaxDuration: number;
   speed: number;
+  trimIn?: number;
+  trimOut?: number;
   fadeIn: number;
   fadeOut: number;
   segments?: ClipSegment[];
