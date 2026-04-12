@@ -22,6 +22,7 @@ import {
   clipDuration,
   clipEnd,
   dbToGain,
+  deriveClipRmsGraph,
   deleteClip,
   formatTime,
   joinClipWithNext,
@@ -39,6 +40,19 @@ const MIN_PIXELS_PER_SECOND = 24;
 type DragMode = 'move' | 'trim-start' | 'trim-end' | 'speed-start' | 'speed-end';
 type FlattenedAudioClip = AudioClip & { trackId: string };
 type DropTarget = 'video' | `audio:${string}` | null;
+type DragSessionState = {
+  kind: 'video' | 'audio';
+  trackId?: string;
+  clipId: string;
+  mode: DragMode;
+};
+type DragPreviewState = {
+  kind: 'video' | 'audio';
+  trackId?: string;
+  clipId: string;
+  timelineStart: number;
+  duration: number;
+};
 
 function isVideoFile(file: File) {
   return file.type.startsWith('video/');
@@ -110,6 +124,8 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [dropTarget, setDropTarget] = useState<DropTarget>(null);
   const [timelineViewportWidth, setTimelineViewportWidth] = useState(0);
+  const [dragSession, setDragSession] = useState<DragSessionState | null>(null);
+  const [dragPreview, setDragPreview] = useState<DragPreviewState | null>(null);
 
   const previewVideoRef = useRef<HTMLVideoElement | null>(null);
   const videoInputRef = useRef<HTMLInputElement | null>(null);
@@ -127,6 +143,9 @@ function App() {
     originX: number;
     initialStart: number;
     initialEnd: number;
+    previewStart?: number;
+    videoClipsSnapshot?: VideoClip[];
+    audioClipsSnapshot?: AudioClip[];
   } | null>(null);
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const seekDragActiveRef = useRef(false);
@@ -142,6 +161,10 @@ function App() {
       ...audioSources.map((source) => [source.id, source] as [string, MediaSourceItem]),
     ]);
   }, [audioSources, videoSources]);
+
+  const audioSourceRmsMap = useMemo(() => {
+    return new Map(audioSources.map((source) => [source.id, source.rmsGraph] as const));
+  }, [audioSources]);
 
   const timelineDuration = useMemo(() => {
     return totalTimelineDuration(videoClips, flattenedAudioClips);
@@ -182,12 +205,14 @@ function App() {
     return () => window.removeEventListener('resize', updateContextMenuPosition);
   }, [contextMenu, contextMenuClip]);
   const timelineSeconds = Math.max(1, Math.ceil(timelineDuration) + 1);
+  const dragPreviewEnd = dragPreview ? dragPreview.timelineStart + dragPreview.duration : 0;
+  const renderedTimelineSeconds = Math.max(timelineSeconds, Math.max(1, Math.ceil(dragPreviewEnd) + 1));
   const pixelsPerSecond = useMemo(() => {
     if (timelineViewportWidth <= 0) return MAX_PIXELS_PER_SECOND;
     const fitted = timelineViewportWidth / timelineSeconds;
     return Math.max(MIN_PIXELS_PER_SECOND, Math.min(MAX_PIXELS_PER_SECOND, fitted));
   }, [timelineSeconds, timelineViewportWidth]);
-  const timelineWidth = Math.max(timelineViewportWidth, timelineSeconds * pixelsPerSecond);
+  const timelineWidth = Math.max(timelineViewportWidth, renderedTimelineSeconds * pixelsPerSecond);
   const previewFade = activeVideoClip ? 1 - fadeGain(activeVideoClip, playhead) : 1;
   const previewAspectRatio = videoSources.length > 0 && videoSources[0]?.width && videoSources[0]?.height
     ? `${videoSources[0].width} / ${videoSources[0].height}`
@@ -429,12 +454,16 @@ function App() {
       const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
       
       const loadedSources = await Promise.all(list.map((file) => loadAudioSource(file)));
-      setAudioSources((current) => [...current, ...loadedSources]);
-      
+
       // 各音声ファイルの RMS グラフを計算
       const rmsGraphs = await Promise.all(
         list.map((file) => computeRmsGraph(file, audioContext))
       );
+
+      setAudioSources((current) => [
+        ...current,
+        ...loadedSources.map((source, index) => ({ ...source, rmsGraph: rmsGraphs[index] })),
+      ]);
 
       setAudioTracks((tracks) => tracks.map((track) => {
         if (track.id !== targetTrackId) return track;
@@ -583,7 +612,11 @@ function App() {
       originX: event.clientX,
       initialStart: clip.timelineStart,
       initialEnd: clipEnd(clip),
+      videoClipsSnapshot: kind === 'video' ? videoClips : undefined,
+      audioClipsSnapshot: kind === 'audio' && trackId ? audioTracks.find((track) => track.id === trackId)?.clips : undefined,
     };
+    setDragSession({ kind, trackId, clipId, mode });
+    setDragPreview(null);
   }
 
   function handleClipPointerDown(
@@ -756,7 +789,7 @@ function App() {
       const blob = await exportTimelineToMp4({
         videoClips,
         audioTracks,
-        videoSource: videoSources[0],
+        videoSources,
         audioSources,
         onProgress: setExportProgress,
         onLog: (message) => setExportLogs((current) => [...current.slice(-120), message]),
@@ -779,6 +812,22 @@ function App() {
 
       const deltaSeconds = (event.clientX - drag.originX) / pixelsPerSecond;
       if (drag.kind === 'video') {
+        if (drag.mode === 'move') {
+          const snapshot = drag.videoClipsSnapshot;
+          if (!snapshot) return;
+          const previewClips = moveClip(snapshot, drag.clipId, drag.initialStart + deltaSeconds, 'video');
+          const previewClip = previewClips.find((clip) => clip.id === drag.clipId);
+          if (!previewClip) return;
+          drag.previewStart = previewClip.timelineStart;
+          setDragPreview({
+            kind: 'video',
+            clipId: drag.clipId,
+            timelineStart: previewClip.timelineStart,
+            duration: clipDuration(previewClip),
+          });
+          return;
+        }
+
         setVideoClips((clips) => {
           switch (drag.mode) {
             case 'move':
@@ -792,6 +841,23 @@ function App() {
             case 'speed-end':
               return changeClipSpeed(clips, drag.clipId, 'end', drag.initialEnd + deltaSeconds, 'video');
           }
+        });
+        return;
+      }
+
+      if (drag.mode === 'move') {
+        const snapshot = drag.audioClipsSnapshot;
+        if (!snapshot) return;
+        const previewClips = moveClip(snapshot, drag.clipId, drag.initialStart + deltaSeconds, 'audio');
+        const previewClip = previewClips.find((clip) => clip.id === drag.clipId);
+        if (!previewClip) return;
+        drag.previewStart = previewClip.timelineStart;
+        setDragPreview({
+          kind: 'audio',
+          trackId: drag.trackId,
+          clipId: drag.clipId,
+          timelineStart: previewClip.timelineStart,
+          duration: clipDuration(previewClip),
         });
         return;
       }
@@ -820,8 +886,25 @@ function App() {
       }));
     };
 
-    const handlePointerUp = () => {
+    const handlePointerUp = (event: PointerEvent) => {
+      const drag = dragRef.current;
+      if (drag && drag.mode === 'move') {
+        const deltaSeconds = (event.clientX - drag.originX) / pixelsPerSecond;
+        const finalStart = drag.previewStart ?? (drag.initialStart + deltaSeconds);
+
+        if (drag.kind === 'video') {
+          setVideoClips((clips) => moveClip(clips, drag.clipId, finalStart, 'video'));
+        } else {
+          setAudioTracks((tracks) => tracks.map((track) => {
+            if (track.id !== drag.trackId) return track;
+            return { ...track, clips: moveClip(track.clips, drag.clipId, finalStart, 'audio') };
+          }));
+        }
+      }
+
       dragRef.current = null;
+      setDragSession(null);
+      setDragPreview(null);
     };
 
     window.addEventListener('pointermove', handlePointerMove);
@@ -851,15 +934,39 @@ function App() {
     );
   }
 
+  function renderGhostClip(clip: VideoClip | AudioClip, left: number, width: number) {
+    return (
+      <div
+        className={`clip-block ${clip.kind === 'video' ? 'video-clip' : 'audio-clip'} clip-ghost`}
+        style={{ left, width }}
+        aria-hidden="true"
+      >
+        {clip.kind === 'audio' ? (
+          <RmsGraph rmsGraph={deriveClipRmsGraph(clip, audioSourceRmsMap)} width={width} height={40} />
+        ) : null}
+        <div className="clip-handle" data-handle="start" />
+        {renderClipLabel(clip)}
+        <div className="clip-handle" data-handle="end" />
+      </div>
+    );
+  }
+
+  const draggedVideoClip = dragPreview?.kind === 'video'
+    ? videoClips.find((clip) => clip.id === dragPreview.clipId) ?? null
+    : null;
+  const draggedAudioClip = dragPreview?.kind === 'audio'
+    ? audioTracks.find((track) => track.id === dragPreview.trackId)?.clips.find((clip) => clip.id === dragPreview.clipId) ?? null
+    : null;
+
   return (
     <main className="video-edit-page" onClick={() => setContextMenu(null)}>
       <div className="topbar">
         <a className="topbar-link" href="../..">トップへ戻る</a>
-        <nav className="topbar-nav" aria-label="tools">
-          <a className="topbar-link" href="../concat/">concat</a>
-          <a className="topbar-link" href="../ugoira/">ugoira</a>
-          <a className="topbar-link" href="../pixiv/">pixiv</a>
-          <a className="topbar-link" href="../character/">character</a>
+        <nav className="topbar-nav" aria-label="ツール移動">
+          <a className="topbar-link" href="../concat/">動画連結</a>
+          <a className="topbar-link" href="../ugoira/">うごイラ</a>
+          <a className="topbar-link" href="../pixiv/">pixivリサイズ</a>
+          <a className="topbar-link" href="../character/">オリキャラ設定</a>
         </nav>
       </div>
 
@@ -939,7 +1046,7 @@ function App() {
               >
                 <div className="timeline-content" style={{ width: timelineWidth }}>
                   <div className="timeline-ruler">
-                    {Array.from({ length: Math.max(2, timelineSeconds + 1) }).map((_, index) => (
+                    {Array.from({ length: Math.max(2, renderedTimelineSeconds + 1) }).map((_, index) => (
                       <div
                         key={index}
                         className="ruler-tick"
@@ -971,7 +1078,7 @@ function App() {
                     {videoClips.map((clip) => (
                       <div
                         key={clip.id}
-                        className="clip-block video-clip"
+                        className={`clip-block video-clip ${dragSession?.mode === 'move' && dragSession.kind === 'video' && dragSession.clipId === clip.id ? 'clip-drag-source' : ''}`}
                         style={{ left: clip.timelineStart * pixelsPerSecond, width: Math.max(12, clipDuration(clip) * pixelsPerSecond) }}
                         onPointerDown={(event) => handleClipPointerDown('video', clip.id, event)}
                         onContextMenu={(event) => {
@@ -984,6 +1091,13 @@ function App() {
                         <div className="clip-handle" data-handle="end" />
                       </div>
                     ))}
+                    {dragPreview && dragPreview.kind === 'video' && draggedVideoClip && Math.abs(dragPreview.timelineStart - draggedVideoClip.timelineStart) > 0.001
+                      ? renderGhostClip(
+                        draggedVideoClip,
+                        dragPreview.timelineStart * pixelsPerSecond,
+                        Math.max(12, dragPreview.duration * pixelsPerSecond),
+                      )
+                      : null}
                   </div>
 
                   {audioTracks.map((track) => (
@@ -1058,23 +1172,34 @@ function App() {
                         {track.clips.map((clip) => {
                           const clipWidth = Math.max(12, clipDuration(clip) * pixelsPerSecond);
                           return (
-                              <div
-                                key={clip.id}
-                                className="clip-block audio-clip"
-                                style={{ left: clip.timelineStart * pixelsPerSecond, width: clipWidth }}
-                                onPointerDown={(event) => handleClipPointerDown('audio', clip.id, event, track.id)}
-                                onContextMenu={(event) => {
-                                  event.preventDefault();
+                            <div
+                              key={clip.id}
+                              className={`clip-block audio-clip ${dragSession?.mode === 'move' && dragSession.kind === 'audio' && dragSession.clipId === clip.id ? 'clip-drag-source' : ''}`}
+                              style={{ left: clip.timelineStart * pixelsPerSecond, width: clipWidth }}
+                              onPointerDown={(event) => handleClipPointerDown('audio', clip.id, event, track.id)}
+                              onContextMenu={(event) => {
+                                event.preventDefault();
                                 setContextMenu({ clipId: clip.id, kind: 'audio', trackId: track.id, x: event.clientX, y: event.clientY });
                               }}
                             >
-                              {clip.rmsGraph && <RmsGraph rmsGraph={clip.rmsGraph} width={clipWidth} height={40} />}
+                              <RmsGraph
+                                rmsGraph={deriveClipRmsGraph(clip, audioSourceRmsMap)}
+                                width={clipWidth}
+                                height={40}
+                              />
                               <div className="clip-handle" data-handle="start" />
                               {renderClipLabel(clip)}
                               <div className="clip-handle" data-handle="end" />
                             </div>
                           );
-                        })}
+                          })}
+                          {dragPreview && dragPreview.kind === 'audio' && dragPreview.trackId === track.id && draggedAudioClip && Math.abs(dragPreview.timelineStart - draggedAudioClip.timelineStart) > 0.001
+                            ? renderGhostClip(
+                              draggedAudioClip,
+                              dragPreview.timelineStart * pixelsPerSecond,
+                              Math.max(12, dragPreview.duration * pixelsPerSecond),
+                            )
+                            : null}
                       </div>
                     </div>
                   ))}

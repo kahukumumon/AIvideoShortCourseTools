@@ -10,6 +10,7 @@ export interface MediaSourceItem {
   width?: number;
   height?: number;
   fps?: number;
+  rmsGraph?: number[];
 }
 
 export interface ClipSegment {

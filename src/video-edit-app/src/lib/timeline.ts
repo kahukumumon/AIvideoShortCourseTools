@@ -5,6 +5,7 @@ export const MAX_SPEED = 4;
 export const MIN_TIMELINE_SECONDS = 0.1;
 export const MIN_VOLUME_DB = -60;
 export const MAX_VOLUME_DB = 12;
+const RMS_SAMPLE_SECONDS = 0.01;
 
 export function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -97,6 +98,30 @@ export function getVisibleSegments(clip: BaseClip): ClipSegment[] {
   return trimSegmentsFromEnd(trimmedStart, getTrimOut(clip));
 }
 
+export function deriveClipRmsGraph(clip: BaseClip, sourceGraphs: Map<string, number[] | undefined>) {
+  const visibleSegments = getVisibleSegments(clip);
+  if (visibleSegments.length === 0) return [];
+
+  const values: number[] = [];
+
+  for (const seg of visibleSegments) {
+    const sourceGraph = sourceGraphs.get(seg.sourceId);
+    if (!sourceGraph || sourceGraph.length === 0) continue;
+
+    const timelineDuration = seg.sourceDuration / (seg.speed * clip.speed);
+    const sampleCount = Math.max(1, Math.round(timelineDuration / RMS_SAMPLE_SECONDS));
+
+    for (let index = 0; index < sampleCount; index += 1) {
+      const timelineTime = ((index + 0.5) / sampleCount) * timelineDuration;
+      const sourceTime = seg.sourceStart + timelineTime * seg.speed * clip.speed;
+      const graphIndex = clamp(Math.floor(sourceTime / RMS_SAMPLE_SECONDS), 0, sourceGraph.length - 1);
+      values.push(sourceGraph[graphIndex]);
+    }
+  }
+
+  return values;
+}
+
 function visibleBaseDuration(clip: BaseClip) {
   return roundTime(fullBaseDuration(clip) - getTrimIn(clip) - getTrimOut(clip));
 }
@@ -152,22 +177,60 @@ export function getNeighborBounds<T extends BaseClip>(clips: T[], clipId: string
   };
 }
 
+type FreeRange = {
+  start: number;
+  end: number;
+};
+
+function getPlacementRanges<T extends BaseClip>(clips: T[], clipId: string, duration: number) {
+  const sorted = normalizeClips(clips.filter((clip) => clip.id !== clipId));
+  const ranges: FreeRange[] = [];
+  let cursor = 0;
+
+  for (const clip of sorted) {
+    const start = Math.max(0, roundTime(clip.timelineStart));
+    const maxStartBeforeClip = roundTime(start - duration);
+    if (maxStartBeforeClip >= cursor) {
+      ranges.push({ start: roundTime(cursor), end: maxStartBeforeClip });
+    }
+    cursor = Math.max(cursor, clipEnd(clip));
+  }
+
+  ranges.push({ start: roundTime(cursor), end: Number.POSITIVE_INFINITY });
+  return ranges;
+}
+
+function pickPlacement(ranges: FreeRange[], desiredStart: number) {
+  if (ranges.length === 0) return roundTime(Math.max(0, desiredStart));
+
+  let previous: FreeRange | null = null;
+  for (const range of ranges) {
+    if (desiredStart < range.start) {
+      if (!previous) {
+        return roundTime(range.start);
+      }
+      const toPrevious = desiredStart - previous.end;
+      const toNext = range.start - desiredStart;
+      return roundTime(toPrevious <= toNext ? previous.end : range.start);
+    }
+
+    if (desiredStart <= range.end) {
+      return roundTime(desiredStart);
+    }
+
+    previous = range;
+  }
+
+  return roundTime(Math.max(desiredStart, ranges[ranges.length - 1].start));
+}
+
 export function moveClip<T extends BaseClip>(clips: T[], clipId: string, desiredStart: number, kind: MediaKind) {
   const current = getClipById(clips, clipId);
   if (!current) return clips;
   const duration = clipDuration(current);
-  const { previousEnd, nextStart } = getNeighborBounds(clips, clipId);
-  const minStart = kind === 'video' ? Math.max(0, previousEnd) : previousEnd;
-  const maxStart = Number.isFinite(nextStart) ? nextStart - duration : Number.POSITIVE_INFINITY;
-  const boundedStart = roundTime(clamp(desiredStart, minStart, Math.max(minStart, maxStart)));
+  const ranges = getPlacementRanges(clips, clipId, duration);
+  const boundedStart = pickPlacement(ranges, desiredStart);
   const updated = clips.map((clip) => (clip.id === clipId ? { ...clip, timelineStart: boundedStart } : clip));
-  if (kind === 'video') {
-    const sorted = normalizeClips(updated);
-    if (sorted.length > 0 && sorted[0].timelineStart !== 0) {
-      const shift = sorted[0].timelineStart;
-      return sorted.map((clip) => ({ ...clip, timelineStart: roundTime(clip.timelineStart - shift) })) as T[];
-    }
-  }
   return normalizeClips(updated) as T[];
 }
 

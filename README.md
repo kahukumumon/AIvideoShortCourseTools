@@ -68,4 +68,15 @@ npm run dev
 
 ## GitHub Pages
 
-GitHub Pages ではリポジトリ全体をそのまま配信し、動画編集ツールは tools/video_edit 配下の静的成果物を参照します。build 後の成果物を含めてデプロイしてください。
+GitHub Pages の公開は GitHub Actions で行います。`main` へ push すると workflow が `npm ci` と `npm run build` を実行し、生成した `tools/video_edit` を含む静的ファイルを Pages にデプロイします。
+
+リリース手順:
+
+1. `src/video-edit-app` などソース側の変更を commit して `main` へ push する
+2. GitHub Actions の `Deploy Pages` が成功することを確認する
+3. 公開後は `https://<user>.github.io/<repo>/tools/video_edit/` で反映を確認する
+
+補足:
+
+- `tools/video_edit` は Vite のビルド出力先ですが、Pages 公開のためにローカルで生成物を commit する運用は必須ではありません
+- ローカルで事前確認したい場合は `npm run build` 実行後に `py -m http.server 8123` でリポジトリ全体を配信して確認できます

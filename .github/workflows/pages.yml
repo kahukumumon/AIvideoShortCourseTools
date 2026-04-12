@@ -25,6 +25,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build video editor
+        run: npm run build
+
       - name: Setup Pages
         id: pages
         uses: actions/configure-pages@v6
@@ -32,10 +44,18 @@ jobs:
           token: ${{ secrets.PAGES_PAT != '' && secrets.PAGES_PAT || github.token }}
           enablement: ${{ secrets.PAGES_PAT != '' }}
 
+      - name: Prepare Pages artifact
+        run: |
+          mkdir _site
+          cp index.html _site/
+          cp .nojekyll _site/
+          cp -R assets _site/assets
+          cp -R tools _site/tools
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v4
         with:
-          path: .
+          path: _site
 
       - name: Deploy
         id: deployment

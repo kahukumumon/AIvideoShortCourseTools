@@ -1,5 +1,5 @@
 ﻿import { describe, expect, it } from 'vitest';
-import { applyTrackVolume, canJoinPair, changeClipSpeed, clipDuration, clipEnd, joinClipWithNext, moveClip, resolveSegmentAtPlaytime, splitClip, totalTimelineDuration, trimClip } from '../lib/timeline';
+import { applyTrackVolume, canJoinPair, changeClipSpeed, clipDuration, clipEnd, deriveClipRmsGraph, joinClipWithNext, moveClip, resolveSegmentAtPlaytime, splitClip, totalTimelineDuration, trimClip } from '../lib/timeline';
 import type { AudioClip, VideoClip } from '../types';
 
 const videoA: VideoClip = {
@@ -42,9 +42,30 @@ describe('timeline helpers', () => {
     expect(moved[1].timelineStart).toBe(4);
   });
 
-  it('keeps first video clip at zero', () => {
+  it('snaps to the nearest legal start instead of oscillating around a boundary', () => {
+    const movedLeft = moveClip([audioA, audioB], 'a2', 1.9, 'audio');
+    const movedRight = moveClip([audioA, audioB], 'a2', 2.1, 'audio');
+
+    expect(movedLeft[1].timelineStart).toBe(4);
+    expect(movedRight[1].timelineStart).toBe(4);
+  });
+
+  it('moves audio clips past later clips when space exists', () => {
+    const audioC: AudioClip = {
+      ...audioA,
+      id: 'a3',
+      timelineStart: 6,
+      sourceStart: 6,
+      sourceDuration: 2,
+    };
+    const moved = moveClip([audioA, audioB, audioC], 'a2', 7, 'audio');
+    expect(moved.map((clip) => clip.id)).toEqual(['a1', 'a3', 'a2']);
+    expect(moved[2].timelineStart).toBe(8);
+  });
+
+  it('allows video clips to leave blank space', () => {
     const moved = moveClip([videoA], 'v1', 3, 'video');
-    expect(moved[0].timelineStart).toBe(0);
+    expect(moved[0].timelineStart).toBe(3);
   });
 
   it('splits at playhead', () => {
@@ -70,6 +91,39 @@ describe('timeline helpers', () => {
   it('applies track volume in bulk', () => {
     const result = applyTrackVolume([audioA, audioB], -9);
     expect(result.every((clip) => clip.volumeDb === -9)).toBe(true);
+  });
+
+  it('derives RMS graph using clip speed and trim', () => {
+    const clip: AudioClip = {
+      ...audioA,
+      sourceDuration: 0.08,
+      sourceMaxDuration: 0.08,
+      speed: 0.5,
+      trimOut: 0.02,
+    };
+    const graph = deriveClipRmsGraph(clip, new Map([['src-a', [0, 1, 2, 3, 4, 5, 6, 7]]]));
+    expect(graph).toEqual([0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5]);
+  });
+
+  it('derives RMS graph across visible joined segments', () => {
+    const clip: AudioClip = {
+      ...audioA,
+      sourceId: 'joined',
+      sourceDuration: 0.04,
+      sourceMaxDuration: 0.04,
+      segments: [
+        { sourceId: 'src-a', sourceStart: 0.01, sourceDuration: 0.02, speed: 1 },
+        { sourceId: 'src-b', sourceStart: 0, sourceDuration: 0.02, speed: 2 },
+      ],
+    };
+    const graph = deriveClipRmsGraph(
+      clip,
+      new Map([
+        ['src-a', [10, 11, 12, 13]],
+        ['src-b', [20, 21, 22, 23]],
+      ]),
+    );
+    expect(graph).toEqual([11, 12, 21]);
   });
 });
 
@@ -383,7 +437,63 @@ describe('複数動画クリップの重複禁止ロジック', () => {
   it('複数動画クリップの移動時に、タイムラインの先頭（t=0）を超えないこと', () => {
     const video1: VideoClip = { ...videoA, id: 'v1', timelineStart: 2, sourceDuration: 4 };
     const moved = moveClip([video1], 'v1', -1, 'video');
-    // 動画クリップは常に t=0 開始を維持する
+    // 動画クリップも t=0 より前には移動できない
     expect(moved[0].timelineStart).toBe(0);
+  });
+
+  it('2 番目の動画クリップを後方へ移動すると 3 番目になれる', () => {
+    const video1: VideoClip = { ...videoA, id: 'v1', timelineStart: 0, sourceDuration: 2 };
+    const video2: VideoClip = { ...videoA, id: 'v2', timelineStart: 2, sourceDuration: 2 };
+    const video3: VideoClip = { ...videoA, id: 'v3', timelineStart: 4, sourceDuration: 2 };
+
+    const moved = moveClip([video1, video2, video3], 'v2', 5, 'video');
+
+    expect(moved.map((clip) => clip.id)).toEqual(['v1', 'v3', 'v2']);
+    expect(moved.find((clip) => clip.id === 'v2')?.timelineStart).toBe(6);
+  });
+
+  it('動画クリップは空白区間があれば前方へ移動できる', () => {
+    const video1: VideoClip = { ...videoA, id: 'v1', timelineStart: 0, sourceDuration: 2 };
+    const video2: VideoClip = { ...videoA, id: 'v2', timelineStart: 5, sourceDuration: 2 };
+    const video3: VideoClip = { ...videoA, id: 'v3', timelineStart: 9, sourceDuration: 2 };
+
+    const moved = moveClip([video1, video2, video3], 'v3', 2.2, 'video');
+
+    expect(moved.map((clip) => clip.id)).toEqual(['v1', 'v3', 'v2']);
+    expect(moved.find((clip) => clip.id === 'v3')?.timelineStart).toBe(2.2);
+  });
+});
+
+describe('moveClip: 空き区間への再配置', () => {
+  it('音声クリップは隣接クリップをまたいで後方へ移動できる', () => {
+    const audio1: AudioClip = { ...audioA, id: 'a1', timelineStart: 0, sourceDuration: 2, sourceMaxDuration: 2 };
+    const audio2: AudioClip = { ...audioA, id: 'a2', timelineStart: 2, sourceStart: 2, sourceDuration: 2, sourceMaxDuration: 4 };
+    const audio3: AudioClip = { ...audioA, id: 'a3', timelineStart: 4, sourceStart: 4, sourceDuration: 2, sourceMaxDuration: 6 };
+
+    const moved = moveClip([audio1, audio2, audio3], 'a2', 5, 'audio');
+
+    expect(moved.map((clip) => clip.id)).toEqual(['a1', 'a3', 'a2']);
+    expect(moved.find((clip) => clip.id === 'a2')?.timelineStart).toBe(6);
+  });
+
+  it('前方に十分な空白があれば後ろの音声クリップを移動できる', () => {
+    const audio1: AudioClip = { ...audioA, id: 'a1', timelineStart: 0, sourceDuration: 2, sourceMaxDuration: 2 };
+    const audio2: AudioClip = { ...audioA, id: 'a2', timelineStart: 5, sourceStart: 2, sourceDuration: 2, sourceMaxDuration: 4 };
+    const audio3: AudioClip = { ...audioA, id: 'a3', timelineStart: 9, sourceStart: 4, sourceDuration: 2, sourceMaxDuration: 6 };
+
+    const moved = moveClip([audio1, audio2, audio3], 'a3', 2.2, 'audio');
+
+    expect(moved.map((clip) => clip.id)).toEqual(['a1', 'a3', 'a2']);
+    expect(moved.find((clip) => clip.id === 'a3')?.timelineStart).toBe(2.2);
+  });
+
+  it('空白が足りない場合は直近の合法位置に止まる', () => {
+    const audio1: AudioClip = { ...audioA, id: 'a1', timelineStart: 0, sourceDuration: 2, sourceMaxDuration: 2 };
+    const audio2: AudioClip = { ...audioA, id: 'a2', timelineStart: 2, sourceStart: 2, sourceDuration: 2, sourceMaxDuration: 4 };
+    const audio3: AudioClip = { ...audioA, id: 'a3', timelineStart: 6, sourceStart: 4, sourceDuration: 2, sourceMaxDuration: 6 };
+
+    const moved = moveClip([audio1, audio2, audio3], 'a3', 3, 'audio');
+
+    expect(moved.find((clip) => clip.id === 'a3')?.timelineStart).toBe(4);
   });
 });

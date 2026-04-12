@@ -15,6 +15,10 @@ function sanitizeFileName(name: string) {
   return name.replace(/[^a-zA-Z0-9_.-]/g, '_');
 }
 
+function isIgnorableFfmpegLog(message: string) {
+  return message === 'Aborted()' || message.startsWith('Aborted(native code called abort())');
+}
+
 async function getFfmpeg(onProgress: (progress: ExportProgress) => void, onLog?: (message: string) => void) {
   // 毎回コールバックを最新に更新する
   currentOnProgress = onProgress;
@@ -24,7 +28,7 @@ async function getFfmpeg(onProgress: (progress: ExportProgress) => void, onLog?:
     ffmpegPromise = (async () => {
       const ffmpeg = new FFmpeg();
       ffmpeg.on('log', ({ message }) => {
-        if (message) currentOnLog?.(message);
+        if (message && !isIgnorableFfmpegLog(message)) currentOnLog?.(message);
       });
       ffmpeg.on('progress', ({ progress }) => {
         currentOnProgress?.({ phase: 'encode', ratio: Math.max(0, Math.min(1, progress)), message: 'mp4 を生成しています。' });
@@ -75,26 +79,31 @@ function unknownErrorMessage(error: unknown) {
   return String(error);
 }
 
+export function collectExportSources(videoSources: MediaSourceItem[], audioSources: MediaSourceItem[]) {
+  return [...videoSources, ...audioSources];
+}
+
 export async function exportTimelineToMp4(options: {
   videoClips: VideoClip[];
   audioTracks: AudioTrack[];
-  videoSource: MediaSourceItem;
+  videoSources: MediaSourceItem[];
   audioSources: MediaSourceItem[];
   onProgress: (progress: ExportProgress) => void;
   onLog?: (message: string) => void;
 }) {
-  const { videoClips, audioTracks, videoSource, audioSources, onProgress, onLog } = options;
+  const { videoClips, audioTracks, videoSources, audioSources, onProgress, onLog } = options;
   const ffmpeg = await getFfmpeg(onProgress, onLog);
   const allAudioClips = audioTracks.flatMap((track) => track.clips);
   const duration = totalTimelineDuration(videoClips, allAudioClips);
-  const sourceMap = new Map<string, MediaSourceItem>([[videoSource.id, videoSource], ...audioSources.map((source) => [source.id, source] as [string, MediaSourceItem])]);
+  const exportSources = collectExportSources(videoSources, audioSources);
+  const sourceMap = new Map<string, MediaSourceItem>(exportSources.map((source) => [source.id, source] as [string, MediaSourceItem]));
 
   onProgress({ phase: 'prepare', ratio: 0.05, message: '入力素材を準備しています。' });
   try { await ffmpeg.deleteDir('inputs'); } catch {}
   try { await ffmpeg.deleteFile('output.mp4'); } catch {}
   await ffmpeg.createDir('inputs');
 
-  for (const source of [videoSource, ...audioSources]) {
+  for (const source of exportSources) {
     const ext = source.file.name.includes('.') ? source.file.name.slice(source.file.name.lastIndexOf('.')) : source.kind === 'video' ? '.mp4' : '.wav';
     const fsName = `inputs/${source.id}_${sanitizeFileName(source.name.replace(ext, ''))}${ext}`;
     await ffmpeg.writeFile(fsName, await fetchFile(source.file));
