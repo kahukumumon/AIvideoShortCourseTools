@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { collectExportSources } from '../lib/exportFfmpeg';
-import type { MediaSourceItem } from '../types';
+import { buildMosaicFilters, collectExportSources } from '../lib/exportFfmpeg';
+import type { MediaSourceItem, MosaicTrack } from '../types';
 
 function makeSource(id: string, kind: 'video' | 'audio', name: string): MediaSourceItem {
   return {
@@ -22,5 +22,36 @@ describe('collectExportSources', () => {
     const sources = collectExportSources([videoA, videoB], [audioA]);
 
     expect(sources.map((source) => source.id)).toEqual(['video-a', 'video-b', 'audio-a']);
+  });
+});
+
+describe('buildMosaicFilters', () => {
+  it('returns empty filters when no mosaic clips', () => {
+    const result = buildMosaicFilters([], 1920, 1080, 'vconcat');
+    expect(result.filters).toEqual([]);
+    expect(result.outputLabel).toBe('vconcat');
+  });
+
+  it('builds geq filters for mosaic clips', () => {
+    const tracks: MosaicTrack[] = [
+      {
+        id: 'm1',
+        name: 'モザイク 1',
+        clips: [
+          {
+            id: 'mc1',
+            timelineStart: 1,
+            duration: 2,
+            mask: { cx: 0.5, cy: 0.4, rx: 0.2, ry: 0.1, angle: 0 },
+          },
+        ],
+      },
+    ];
+
+    const result = buildMosaicFilters(tracks, 1920, 1080, 'vconcat');
+    expect(result.filters).toHaveLength(1);
+    expect(result.filters[0]).toContain('geq=lum=');
+    expect(result.filters[0]).toContain("between(t,1.000000,3.000000)");
+    expect(result.outputLabel).toBe('mosaicout0');
   });
 });

@@ -1,4 +1,4 @@
-import type { AudioClip, BaseClip, ClipSegment, MediaKind, VideoClip } from '../types';
+﻿import type { AudioClip, BaseClip, ClipSegment, EllipseMask, MediaKind, MosaicClip, MosaicTrack, VideoClip } from '../types';
 
 export const MIN_SPEED = 0.25;
 export const MAX_SPEED = 4;
@@ -449,9 +449,206 @@ export function applyTrackVolume(clips: AudioClip[], volumeDb: number) {
   return clips.map((clip) => ({ ...clip, volumeDb: clampVolumeDb(volumeDb) }));
 }
 
+// ─── モザイク関連ユーティリティ ───────────────────────────────────────────
+
+/**
+ * 動画長辺に対するモザイクのピクセルサイズ（長辺の 1/100）を返す。
+ */
+export function calcMosaicPixelSize(videoLongerSide: number): number {
+  return videoLongerSide / 100;
+}
+
+function normalizeMosaicClips(clips: MosaicClip[]): MosaicClip[] {
+  return [...clips].sort((a, b) => a.timelineStart - b.timelineStart);
+}
+
+function mosaicClipEnd(clip: MosaicClip): number {
+  return roundTime(clip.timelineStart + clip.duration);
+}
+
+/** モザイクトラック内で他クリップと重複しない配置座標を解決する */
+function pickMosaicPlacement(clips: MosaicClip[], clipId: string, duration: number, desiredStart: number): number {
+  const others = normalizeMosaicClips(clips.filter((c) => c.id !== clipId));
+  const safeDuration = Math.max(MIN_TIMELINE_SECONDS, duration);
+
+  // 空きレンジを列挙
+  type Range = { start: number; end: number };
+  const ranges: Range[] = [];
+  let cursor = 0;
+  for (const other of others) {
+    const start = Math.max(0, roundTime(other.timelineStart));
+    const maxStart = roundTime(start - safeDuration);
+    if (maxStart >= cursor) {
+      ranges.push({ start: roundTime(cursor), end: maxStart });
+    }
+    cursor = Math.max(cursor, mosaicClipEnd(other));
+  }
+  ranges.push({ start: roundTime(cursor), end: Number.POSITIVE_INFINITY });
+
+  const clamped = Math.max(0, desiredStart);
+  return pickPlacement(ranges, clamped);
+}
+
+export function moveMosaicClip(tracks: MosaicTrack[], trackId: string, clipId: string, desiredStart: number): MosaicTrack[] {
+  return tracks.map((track) => {
+    if (track.id !== trackId) return track;
+    const clip = track.clips.find((c) => c.id === clipId);
+    if (!clip) return track;
+    const newStart = pickMosaicPlacement(track.clips, clipId, clip.duration, desiredStart);
+    const updated = normalizeMosaicClips(
+      track.clips.map((c) => (c.id === clipId ? { ...c, timelineStart: newStart } : c)),
+    );
+    return { ...track, clips: updated };
+  });
+}
+
+export function trimMosaicClip(
+  tracks: MosaicTrack[],
+  trackId: string,
+  clipId: string,
+  side: 'start' | 'end',
+  desiredEdge: number,
+): MosaicTrack[] {
+  return tracks.map((track) => {
+    if (track.id !== trackId) return track;
+    const sorted = normalizeMosaicClips(track.clips);
+    const index = sorted.findIndex((clip) => clip.id === clipId);
+    if (index < 0) return track;
+
+    const current = sorted[index];
+    const currentStart = current.timelineStart;
+    const currentEnd = mosaicClipEnd(current);
+    const previousEnd = index > 0 ? mosaicClipEnd(sorted[index - 1]) : 0;
+    const nextStart = index < sorted.length - 1 ? sorted[index + 1].timelineStart : Number.POSITIVE_INFINITY;
+
+    let nextClip = current;
+
+    if (side === 'start') {
+      const edge = clamp(desiredEdge, previousEnd, currentEnd - MIN_TIMELINE_SECONDS);
+      nextClip = {
+        ...current,
+        timelineStart: roundTime(edge),
+        duration: roundTime(currentEnd - edge),
+      };
+    } else {
+      const edge = clamp(desiredEdge, currentStart + MIN_TIMELINE_SECONDS, nextStart);
+      nextClip = {
+        ...current,
+        duration: roundTime(edge - currentStart),
+      };
+    }
+
+    return {
+      ...track,
+      clips: normalizeMosaicClips(track.clips.map((clip) => (clip.id === clipId ? nextClip : clip))),
+    };
+  });
+}
+
+export function splitMosaicClip(tracks: MosaicTrack[], trackId: string, clipId: string, playhead: number): MosaicTrack[] {
+  return tracks.map((track) => {
+    if (track.id !== trackId) return track;
+    const clip = track.clips.find((c) => c.id === clipId);
+    if (!clip) return track;
+    const localTime = roundTime(playhead - clip.timelineStart);
+    if (localTime <= MIN_TIMELINE_SECONDS || clip.duration - localTime <= MIN_TIMELINE_SECONDS) {
+      return track;
+    }
+    const left: MosaicClip = { ...clip, duration: roundTime(localTime) };
+    const right: MosaicClip = {
+      ...clip,
+      id: crypto.randomUUID(),
+      timelineStart: roundTime(playhead),
+      duration: roundTime(clip.duration - localTime),
+      mask: { ...clip.mask },
+    };
+    const newClips = normalizeMosaicClips(
+      track.clips.flatMap((c) => (c.id === clipId ? [left, right] : [c])),
+    );
+    return { ...track, clips: newClips };
+  });
+}
+
+export function joinMosaicClipWithNext(tracks: MosaicTrack[], trackId: string, clipId: string): MosaicTrack[] {
+  return tracks.map((track) => {
+    if (track.id !== trackId) return track;
+    const sorted = normalizeMosaicClips(track.clips);
+    const index = sorted.findIndex((c) => c.id === clipId);
+    if (index === -1 || index === sorted.length - 1) return track;
+    const left = sorted[index];
+    const right = sorted[index + 1];
+    if (Math.abs(mosaicClipEnd(left) - right.timelineStart) > 0.02) return track;
+    const merged: MosaicClip = {
+      ...left,
+      duration: roundTime(mosaicClipEnd(right) - left.timelineStart),
+    };
+    const newClips = sorted
+      .filter((c) => c.id !== right.id)
+      .map((c) => (c.id === left.id ? merged : c));
+    return { ...track, clips: newClips };
+  });
+}
+
+export function deleteMosaicClip(tracks: MosaicTrack[], trackId: string, clipId: string): MosaicTrack[] {
+  return tracks.map((track) => {
+    if (track.id !== trackId) return track;
+    return { ...track, clips: track.clips.filter((c) => c.id !== clipId) };
+  });
+}
+
+export function updateMosaicEllipse(tracks: MosaicTrack[], trackId: string, clipId: string, mask: EllipseMask): MosaicTrack[] {
+  const clamped: EllipseMask = {
+    cx: clamp(mask.cx, 0, 1),
+    cy: clamp(mask.cy, 0, 1),
+    rx: clamp(mask.rx, 0, 1),
+    ry: clamp(mask.ry, 0, 1),
+    angle: mask.angle,
+  };
+  return tracks.map((track) => {
+    if (track.id !== trackId) return track;
+    return {
+      ...track,
+      clips: track.clips.map((c) => (c.id === clipId ? { ...c, mask: clamped } : c)),
+    };
+  });
+}
+
+export function addMosaicTrack(tracks: MosaicTrack[]): MosaicTrack[] {
+  return [
+    ...tracks,
+    {
+      id: crypto.randomUUID(),
+      name: `モザイク ${tracks.length + 1}`,
+      clips: [],
+    },
+  ];
+}
+
+export function getActiveMosaicClips(tracks: MosaicTrack[], currentTime: number): { track: MosaicTrack; clip: MosaicClip }[] {
+  const result: { track: MosaicTrack; clip: MosaicClip }[] = [];
+  for (const track of tracks) {
+    for (const clip of track.clips) {
+      if (currentTime >= clip.timelineStart && currentTime < clip.timelineStart + clip.duration) {
+        result.push({ track, clip });
+      }
+    }
+  }
+  return result;
+}
+
+export function addMosaicClipToTrack(tracks: MosaicTrack[], trackId: string, clip: MosaicClip): MosaicTrack[] {
+  return tracks.map((track) => {
+    if (track.id !== trackId) return track;
+    const newStart = pickMosaicPlacement(track.clips, clip.id, clip.duration, clip.timelineStart);
+    const newClip: MosaicClip = { ...clip, timelineStart: newStart };
+    return { ...track, clips: normalizeMosaicClips([...track.clips, newClip]) };
+  });
+}
+
 export function totalTimelineDuration(videoClips: VideoClip[], audioClips: AudioClip[]) {
   if (videoClips.length > 0) {
     return Math.max(0, ...videoClips.map((clip) => clipEnd(clip)));
   }
   return Math.max(0, ...audioClips.map((clip) => clipEnd(clip)));
 }
+

@@ -5,8 +5,11 @@ import type {
   AudioClip,
   AudioTrack,
   ContextMenuState,
+  EllipseMask,
   ExportProgress,
   MediaSourceItem,
+  MosaicClip,
+  MosaicTrack,
   VideoClip,
 } from './types';
 import { loadAudioSource, loadVideoSource } from './lib/media';
@@ -14,7 +17,10 @@ import { exportTimelineToMp4 } from './lib/exportFfmpeg';
 import { computeRmsGraph } from './lib/rms';
 import { RmsGraph } from './components/RmsGraph';
 import {
+  addMosaicClipToTrack,
+  addMosaicTrack,
   applyTrackVolume,
+  calcMosaicPixelSize,
   canJoinPair,
   changeClipSpeed,
   clampFade,
@@ -22,16 +28,23 @@ import {
   clipDuration,
   clipEnd,
   dbToGain,
+  deleteMosaicClip,
   deriveClipRmsGraph,
   deleteClip,
   formatTime,
+  getActiveMosaicClips,
   joinClipWithNext,
+  joinMosaicClipWithNext,
   moveClip,
+  moveMosaicClip,
   normalizeClips,
   resolveSegmentAtPlaytime,
   splitClip,
+  splitMosaicClip,
   totalTimelineDuration,
   trimClip,
+  trimMosaicClip,
+  updateMosaicEllipse,
 } from './lib/timeline';
 
 const MAX_PIXELS_PER_SECOND = 88;
@@ -112,6 +125,9 @@ function App() {
   const [audioSources, setAudioSources] = useState<MediaSourceItem[]>([]);
   const [videoClips, setVideoClips] = useState<VideoClip[]>([]);
   const [audioTracks, setAudioTracks] = useState<AudioTrack[]>([initialTrack]);
+  const [mosaicTracks, setMosaicTracks] = useState<MosaicTrack[]>([]);
+  const [selectedMosaicClipId, setSelectedMosaicClipId] = useState<string | null>(null);
+  const [selectedMosaicTrackId, setSelectedMosaicTrackId] = useState<string | null>(null);
   const [selectedTrackId, setSelectedTrackId] = useState<string>(initialTrack.id);
   const [playhead, setPlayhead] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -128,6 +144,7 @@ function App() {
   const [dragPreview, setDragPreview] = useState<DragPreviewState | null>(null);
 
   const previewVideoRef = useRef<HTMLVideoElement | null>(null);
+  const mosaicCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const videoInputRef = useRef<HTMLInputElement | null>(null);
   const audioInputRef = useRef<HTMLInputElement | null>(null);
   const timelineScrollRef = useRef<HTMLDivElement | null>(null);
@@ -147,6 +164,15 @@ function App() {
     videoClipsSnapshot?: VideoClip[];
     audioClipsSnapshot?: AudioClip[];
   } | null>(null);
+  const mosaicDragRef = useRef<{
+    trackId: string;
+    clipId: string;
+    mode: 'move' | 'trim-start' | 'trim-end';
+    originX: number;
+    initialStart: number;
+    initialEnd: number;
+  } | null>(null);
+
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const seekDragActiveRef = useRef(false);
   const seekDragPointerIdRef = useRef<number | null>(null);
@@ -176,6 +202,7 @@ function App() {
 
   const contextMenuClip = useMemo(() => {
     if (!contextMenu) return null;
+    if (contextMenu.kind === 'mosaic') return null;
     if (contextMenu.kind === 'video') {
       return videoClips.find((clip) => clip.id === contextMenu.clipId) ?? null;
     }
@@ -183,10 +210,16 @@ function App() {
     return track?.clips.find((clip) => clip.id === contextMenu.clipId) ?? null;
   }, [audioTracks, contextMenu, videoClips]);
 
+  const contextMenuMosaicClip = useMemo(() => {
+    if (!contextMenu || contextMenu.kind !== 'mosaic') return null;
+    const track = mosaicTracks.find((t) => t.id === contextMenu.trackId);
+    return track?.clips.find((c) => c.id === contextMenu.clipId) ?? null;
+  }, [contextMenu, mosaicTracks]);
+
   const contextMenuMaxFade = contextMenuClip ? clipDuration(contextMenuClip) / 2 : 0;
 
   useEffect(() => {
-    if (!contextMenu || !contextMenuClip) {
+    if (!contextMenu || (!contextMenuClip && !contextMenuMosaicClip)) {
       setContextMenuPosition(null);
       return;
     }
@@ -203,7 +236,7 @@ function App() {
     updateContextMenuPosition();
     window.addEventListener('resize', updateContextMenuPosition);
     return () => window.removeEventListener('resize', updateContextMenuPosition);
-  }, [contextMenu, contextMenuClip]);
+  }, [contextMenu, contextMenuClip, contextMenuMosaicClip]);
   const timelineSeconds = Math.max(1, Math.ceil(timelineDuration) + 1);
   const dragPreviewEnd = dragPreview ? dragPreview.timelineStart + dragPreview.duration : 0;
   const renderedTimelineSeconds = Math.max(timelineSeconds, Math.max(1, Math.ceil(dragPreviewEnd) + 1));
@@ -721,6 +754,13 @@ function App() {
   function removeActiveClip() {
     if (!contextMenu) return;
 
+    if (contextMenu.kind === 'mosaic') {
+      setMosaicTracks((tracks) => deleteMosaicClip(tracks, contextMenu.trackId ?? '', contextMenu.clipId));
+      if (selectedMosaicClipId === contextMenu.clipId) setSelectedMosaicClipId(null);
+      setContextMenu(null);
+      return;
+    }
+
     if (contextMenu.kind === 'video') {
       setVideoClips((clips) => deleteClip(clips, contextMenu.clipId));
     } else {
@@ -735,6 +775,12 @@ function App() {
   function splitActiveClip() {
     if (!contextMenu) return;
 
+    if (contextMenu.kind === 'mosaic') {
+      setMosaicTracks((tracks) => splitMosaicClip(tracks, contextMenu.trackId ?? '', contextMenu.clipId, playhead));
+      setContextMenu(null);
+      return;
+    }
+
     if (contextMenu.kind === 'video') {
       setVideoClips((clips) => splitClip(clips, contextMenu.clipId, playhead));
     } else {
@@ -748,6 +794,17 @@ function App() {
 
   function canJoinMenuClip() {
     if (!contextMenu) return false;
+
+    if (contextMenu.kind === 'mosaic') {
+      const track = mosaicTracks.find((t) => t.id === contextMenu.trackId);
+      if (!track) return false;
+      const sorted = [...track.clips].sort((a, b) => a.timelineStart - b.timelineStart);
+      const index = sorted.findIndex((c) => c.id === contextMenu.clipId);
+      if (index < 0 || index >= sorted.length - 1) return false;
+      const left = sorted[index];
+      const right = sorted[index + 1];
+      return Math.abs(left.timelineStart + left.duration - right.timelineStart) <= 0.02;
+    }
 
     if (contextMenu.kind === 'video') {
       const sorted = normalizeClips(videoClips);
@@ -765,6 +822,12 @@ function App() {
   function joinActiveClip() {
     if (!contextMenu || !canJoinMenuClip()) return;
 
+    if (contextMenu.kind === 'mosaic') {
+      setMosaicTracks((tracks) => joinMosaicClipWithNext(tracks, contextMenu.trackId ?? '', contextMenu.clipId));
+      setContextMenu(null);
+      return;
+    }
+
     if (contextMenu.kind === 'video') {
       setVideoClips((clips) => joinClipWithNext(clips, contextMenu.clipId));
     } else {
@@ -774,6 +837,359 @@ function App() {
       }));
     }
     setContextMenu(null);
+  }
+
+  // ─── モザイク操作ハンドラー ──────────────────────────────────────────────
+
+  function handleAddMosaicTrack() {
+    setMosaicTracks((tracks) => addMosaicTrack(tracks));
+  }
+
+  function handleDeleteMosaicTrack(trackId: string) {
+    const deletingTrack = mosaicTracks.find((track) => track.id === trackId);
+    setMosaicTracks((tracks) => tracks.filter((track) => track.id !== trackId));
+    setSelectedMosaicTrackId((current) => (current === trackId ? null : current));
+    setSelectedMosaicClipId((current) => {
+      if (!current) return current;
+      if (!deletingTrack) return current;
+      return deletingTrack.clips.some((clip) => clip.id === current) ? null : current;
+    });
+  }
+
+  function handleAddMosaicClip(trackId: string) {
+    const newClip: MosaicClip = {
+      id: crypto.randomUUID(),
+      timelineStart: playhead,
+      duration: 2,
+      mask: { cx: 0.5, cy: 0.5, rx: 0.2, ry: 0.1, angle: 0 },
+    };
+    setMosaicTracks((tracks) => addMosaicClipToTrack(tracks, trackId, newClip));
+    setSelectedMosaicClipId(newClip.id);
+    setSelectedMosaicTrackId(trackId);
+  }
+
+  function handleMosaicClipPointerDown(
+    trackId: string,
+    clipId: string,
+    event: React.PointerEvent<HTMLDivElement>,
+  ) {
+    if (event.button !== 0) return;
+    event.stopPropagation();
+    event.preventDefault();
+    const track = mosaicTracks.find((t) => t.id === trackId);
+    const clip = track?.clips.find((c) => c.id === clipId);
+    if (!clip) return;
+
+    const target = event.target as HTMLElement;
+    const handle = target.closest<HTMLElement>('[data-handle]')?.dataset.handle;
+    const mode = handle === 'start' ? 'trim-start' : handle === 'end' ? 'trim-end' : 'move';
+
+    setContextMenu(null);
+    setSelectedMosaicClipId(clipId);
+    setSelectedMosaicTrackId(trackId);
+    mosaicDragRef.current = {
+      trackId,
+      clipId,
+      mode,
+      originX: event.clientX,
+      initialStart: clip.timelineStart,
+      initialEnd: clip.timelineStart + clip.duration,
+    };
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+  }
+
+  function handleMosaicClipPointerMove(event: React.PointerEvent<HTMLDivElement>) {
+    const drag = mosaicDragRef.current;
+    if (!drag) return;
+    const deltaSeconds = (event.clientX - drag.originX) / pixelsPerSecond;
+
+    if (drag.mode === 'move') {
+      setMosaicTracks((tracks) => moveMosaicClip(tracks, drag.trackId, drag.clipId, drag.initialStart + deltaSeconds));
+      return;
+    }
+
+    if (drag.mode === 'trim-start') {
+      setMosaicTracks((tracks) => trimMosaicClip(tracks, drag.trackId, drag.clipId, 'start', drag.initialStart + deltaSeconds));
+      return;
+    }
+
+    setMosaicTracks((tracks) => trimMosaicClip(tracks, drag.trackId, drag.clipId, 'end', drag.initialEnd + deltaSeconds));
+  }
+
+  function handleMosaicClipPointerUp(event: React.PointerEvent<HTMLDivElement>) {
+    (event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId);
+    mosaicDragRef.current = null;
+  }
+
+  // ─── モザイク楕円オーバーレイ描画 ─────────────────────────────────────────
+
+  useEffect(() => {
+    const canvas = mosaicCanvasRef.current;
+    if (!canvas) return;
+    const video = previewVideoRef.current;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    const w = canvas.width;
+    const h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+
+    const activeClips = getActiveMosaicClips(mosaicTracks, playhead);
+    if (activeClips.length === 0) return;
+
+    // ピクセルモザイクを描画する（OffscreenCanvas 非対応環境は通常 canvas でフォールバック）
+    if (video && video.readyState >= 2) {
+      const videoWidth = video.videoWidth || w;
+      const videoHeight = video.videoHeight || h;
+      const longerSide = Math.max(videoWidth, videoHeight);
+      const ps = Math.max(2, Math.floor(calcMosaicPixelSize(longerSide)));
+
+      const fallbackCanvas = document.createElement('canvas');
+      fallbackCanvas.width = w;
+      fallbackCanvas.height = h;
+      const offscreen: OffscreenCanvas | HTMLCanvasElement = typeof OffscreenCanvas !== 'undefined'
+        ? new OffscreenCanvas(w, h)
+        : fallbackCanvas;
+      const offCtx = offscreen.getContext('2d');
+      if (offCtx) {
+        offCtx.drawImage(video, 0, 0, w, h);
+        const imageData = offCtx.getImageData(0, 0, w, h);
+        const { data } = imageData;
+
+        for (const { clip } of activeClips) {
+          const { cx, cy, rx, ry, angle } = clip.mask;
+          const cosA = Math.cos(angle || 0);
+          const sinA = Math.sin(angle || 0);
+          for (let blockY = 0; blockY < h; blockY += ps) {
+            for (let blockX = 0; blockX < w; blockX += ps) {
+              // ブロック中心の正規化座標
+              const nx = (blockX + ps / 2) / w;
+              const ny = (blockY + ps / 2) / h;
+              const dx = nx - cx;
+              const dy = ny - cy;
+              // 楕円ローカル座標へ逆回転して判定
+              const localX = dx * cosA + dy * sinA;
+              const localY = -dx * sinA + dy * cosA;
+              const ex = rx > 0 ? localX / rx : 9999;
+              const ey = ry > 0 ? localY / ry : 9999;
+              if (ex * ex + ey * ey > 1) continue;
+
+              // ブロック内の平均色を計算
+              let rSum = 0;
+              let gSum = 0;
+              let bSum = 0;
+              let count = 0;
+              for (let dyPix = 0; dyPix < ps && blockY + dyPix < h; dyPix += 1) {
+                for (let dxPix = 0; dxPix < ps && blockX + dxPix < w; dxPix += 1) {
+                  const idx = ((blockY + dyPix) * w + (blockX + dxPix)) * 4;
+                  rSum += data[idx];
+                  gSum += data[idx + 1];
+                  bSum += data[idx + 2];
+                  count += 1;
+                }
+              }
+              if (count === 0) continue;
+              const rAvg = rSum / count;
+              const gAvg = gSum / count;
+              const bAvg = bSum / count;
+
+              // 平均色でブロックを塗りつぶす
+              for (let dyPix = 0; dyPix < ps && blockY + dyPix < h; dyPix += 1) {
+                for (let dxPix = 0; dxPix < ps && blockX + dxPix < w; dxPix += 1) {
+                  const idx = ((blockY + dyPix) * w + (blockX + dxPix)) * 4;
+                  data[idx] = rAvg;
+                  data[idx + 1] = gAvg;
+                  data[idx + 2] = bAvg;
+                }
+              }
+            }
+          }
+        }
+
+        offCtx.putImageData(imageData, 0, 0);
+        ctx.drawImage(offscreen as CanvasImageSource, 0, 0, w, h);
+      }
+    }
+
+    // 楕円のアウトライン（選択中はハンドル付き）を描画
+    for (const { clip } of activeClips) {
+      const { cx, cy, rx, ry, angle } = clip.mask;
+      const px = cx * w;
+      const py = cy * h;
+      const prx = rx * w;
+      const pry = ry * h;
+      const cosA = Math.cos(angle || 0);
+      const sinA = Math.sin(angle || 0);
+
+      ctx.beginPath();
+      ctx.ellipse(px, py, prx, pry, angle || 0, 0, Math.PI * 2);
+      ctx.strokeStyle = clip.id === selectedMosaicClipId ? 'rgba(255,140,60,0.95)' : 'rgba(144,238,144,0.95)';
+      ctx.lineWidth = clip.id === selectedMosaicClipId ? 2 : 1;
+      ctx.stroke();
+
+      if (clip.id === selectedMosaicClipId) {
+        // ハンドル（中心・4方向・回転）
+        const right: [number, number] = [px + prx * cosA, py + prx * sinA];
+        const left: [number, number] = [px - prx * cosA, py - prx * sinA];
+        const down: [number, number] = [px - pry * sinA, py + pry * cosA];
+        const up: [number, number] = [px + pry * sinA, py - pry * cosA];
+        const rotate: [number, number] = [up[0] + (up[0] - px) * 0.35, up[1] + (up[1] - py) * 0.35];
+        const handles: Array<[number, number, boolean]> = [
+          [px, py, false],
+          [right[0], right[1], false],
+          [left[0], left[1], false],
+          [down[0], down[1], false],
+          [up[0], up[1], false],
+          [rotate[0], rotate[1], true],
+        ];
+        for (const [hx, hy, isRotate] of handles) {
+          ctx.beginPath();
+          ctx.arc(hx, hy, 5, 0, Math.PI * 2);
+          ctx.fillStyle = isRotate ? 'rgba(96,218,251,0.95)' : 'rgba(255,200,0,0.9)';
+          ctx.fill();
+          ctx.strokeStyle = '#000';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }
+      }
+    }
+  }, [mosaicTracks, playhead, selectedMosaicClipId]);
+
+  // ─── モザイクオーバーレイのポインタ操作（楕円の移動・リサイズ・回転）──────────
+
+  const mosaicOverlayDragRef = useRef<{
+    clipId: string;
+    trackId: string;
+    mode: 'move' | 'resize-right' | 'resize-left' | 'resize-bottom' | 'resize-top' | 'rotate';
+    originX: number;
+    originY: number;
+    initialMask: EllipseMask;
+  } | null>(null);
+
+  function handleMosaicOverlayPointerDown(event: React.PointerEvent<HTMLCanvasElement>) {
+    if (event.button !== 0) return;
+    const canvas = mosaicCanvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const mx = (event.clientX - rect.left) / rect.width;
+    const my = (event.clientY - rect.top) / rect.height;
+
+    const activeClips = getActiveMosaicClips(mosaicTracks, playhead);
+    // 選択中クリップのハンドル判定を優先
+    const sorted = [...activeClips].sort((a, b) =>
+      a.clip.id === selectedMosaicClipId ? -1 : b.clip.id === selectedMosaicClipId ? 1 : 0,
+    );
+
+    for (const { clip, track } of sorted) {
+      const { cx, cy, rx, ry, angle } = clip.mask;
+      const cosA = Math.cos(angle || 0);
+      const sinA = Math.sin(angle || 0);
+      const handleRadius = 0.02;
+
+      // ハンドル判定（正規化座標）
+      const right: [number, number] = [cx + rx * cosA, cy + rx * sinA];
+      const left: [number, number] = [cx - rx * cosA, cy - rx * sinA];
+      const down: [number, number] = [cx - ry * sinA, cy + ry * cosA];
+      const up: [number, number] = [cx + ry * sinA, cy - ry * cosA];
+      const rotate: [number, number] = [up[0] + (up[0] - cx) * 0.35, up[1] + (up[1] - cy) * 0.35];
+
+      const hitHandles: Array<[number, number, 'move' | 'resize-right' | 'resize-left' | 'resize-bottom' | 'resize-top' | 'rotate']> = [
+        [right[0], right[1], 'resize-right'],
+        [left[0], left[1], 'resize-left'],
+        [down[0], down[1], 'resize-bottom'],
+        [up[0], up[1], 'resize-top'],
+        [rotate[0], rotate[1], 'rotate'],
+        [cx, cy, 'move'],
+      ];
+
+      for (const [hx, hy, mode] of hitHandles) {
+        const dx = (mx - hx) * (rect.width / rect.height > 1 ? rect.width / rect.height : 1);
+        const dy = my - hy;
+        if (Math.sqrt(dx * dx + dy * dy) <= handleRadius) {
+          setSelectedMosaicClipId(clip.id);
+          setSelectedMosaicTrackId(track.id);
+          mosaicOverlayDragRef.current = {
+            clipId: clip.id,
+            trackId: track.id,
+            mode,
+            originX: mx,
+            originY: my,
+            initialMask: { ...clip.mask },
+          };
+          event.currentTarget.setPointerCapture(event.pointerId);
+          event.stopPropagation();
+          return;
+        }
+      }
+
+      // 回転楕円内クリックで選択
+      const dx = mx - cx;
+      const dy = my - cy;
+      const localX = dx * cosA + dy * sinA;
+      const localY = -dx * sinA + dy * cosA;
+      const ex = rx > 0 ? localX / rx : 9999;
+      const ey = ry > 0 ? localY / ry : 9999;
+      if (ex * ex + ey * ey <= 1) {
+        setSelectedMosaicClipId(clip.id);
+        setSelectedMosaicTrackId(track.id);
+        mosaicOverlayDragRef.current = {
+          clipId: clip.id,
+          trackId: track.id,
+          mode: 'move',
+          originX: mx,
+          originY: my,
+          initialMask: { ...clip.mask },
+        };
+        event.currentTarget.setPointerCapture(event.pointerId);
+        event.stopPropagation();
+        return;
+      }
+    }
+  }
+
+  function handleMosaicOverlayPointerMove(event: React.PointerEvent<HTMLCanvasElement>) {
+    const drag = mosaicOverlayDragRef.current;
+    if (!drag) return;
+    const canvas = mosaicCanvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const mx = (event.clientX - rect.left) / rect.width;
+    const my = (event.clientY - rect.top) / rect.height;
+    const dx = mx - drag.originX;
+    const dy = my - drag.originY;
+    const { initialMask } = drag;
+
+    let newMask: EllipseMask = { ...initialMask };
+    switch (drag.mode) {
+      case 'move':
+        newMask = { ...initialMask, cx: initialMask.cx + dx, cy: initialMask.cy + dy };
+        break;
+      case 'resize-right':
+        newMask = { ...initialMask, rx: Math.max(0.01, initialMask.rx + dx) };
+        break;
+      case 'resize-left':
+        newMask = { ...initialMask, rx: Math.max(0.01, initialMask.rx - dx) };
+        break;
+      case 'resize-bottom':
+        newMask = { ...initialMask, ry: Math.max(0.01, initialMask.ry + dy) };
+        break;
+      case 'resize-top':
+        newMask = { ...initialMask, ry: Math.max(0.01, initialMask.ry - dy) };
+        break;
+      case 'rotate': {
+        const startAngle = Math.atan2(drag.originY - initialMask.cy, drag.originX - initialMask.cx);
+        const nowAngle = Math.atan2(my - initialMask.cy, mx - initialMask.cx);
+        newMask = { ...initialMask, angle: initialMask.angle + (nowAngle - startAngle) };
+        break;
+      }
+    }
+
+    setMosaicTracks((tracks) => updateMosaicEllipse(tracks, drag.trackId, drag.clipId, newMask));
+  }
+
+  function handleMosaicOverlayPointerUp(event: React.PointerEvent<HTMLCanvasElement>) {
+    event.currentTarget.releasePointerCapture(event.pointerId);
+    mosaicOverlayDragRef.current = null;
   }
 
   async function runExport() {
@@ -789,6 +1205,7 @@ function App() {
       const blob = await exportTimelineToMp4({
         videoClips,
         audioTracks,
+        mosaicTracks,
         videoSources,
         audioSources,
         onProgress: setExportProgress,
@@ -1002,6 +1419,17 @@ function App() {
                   <>
                     <video ref={previewVideoRef} playsInline preload="auto" />
                     <div className="preview-fade" style={{ opacity: previewFade }} />
+                    <canvas
+                      ref={mosaicCanvasRef}
+                      className="mosaic-overlay"
+                      width={640}
+                      height={360}
+                      style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: mosaicTracks.length > 0 ? 'auto' : 'none' }}
+                      onPointerDown={handleMosaicOverlayPointerDown}
+                      onPointerMove={handleMosaicOverlayPointerMove}
+                      onPointerUp={handleMosaicOverlayPointerUp}
+                      onPointerCancel={handleMosaicOverlayPointerUp}
+                    />
                   </>
                 ) : (
                   <div className="preview-empty">動画を追加するとここにプレビューが表示されます。</div>
@@ -1203,6 +1631,63 @@ function App() {
                       </div>
                     </div>
                   ))}
+
+                                    {/* ─── モザイクタイムライン ─── */}
+                  <div className="mosaic-tracks-section">
+                    <div className="audio-track-bar">
+                      <button className="secondary" type="button" onClick={handleAddMosaicTrack}>
+                        ＋モザイクトラック追加
+                      </button>
+                    </div>
+                    <p className="mosaic-help-text">
+                      各モザイク行名の右にある追加ボタンで区間を作成します。区間ブロックはドラッグで移動、端ドラッグで長さ調整、右クリックで分割・結合・削除できます。
+                    </p>
+                    {mosaicTracks.map((track) => (
+                      <div key={track.id} className="audio-track-block">
+                        <div className="audio-track-bar">
+                          <span className="track-chip">{track.name}</span>
+                          <button className="secondary" type="button" onClick={() => handleAddMosaicClip(track.id)}>
+                            追加
+                          </button>
+                          <button className="secondary" type="button" onClick={() => handleDeleteMosaicTrack(track.id)}>
+                            {`${track.name.replace(/\s+/g, '')}削除`}
+                          </button>
+                        </div>
+                        <div className="track-lane mosaic-lane" style={{ position: 'relative', minHeight: 72 }} data-no-timeline-seek>
+                          <div className="playhead" style={{ left: playhead * pixelsPerSecond }} />
+                          {track.clips.map((clip) => {
+                            const clipLeft = clip.timelineStart * pixelsPerSecond;
+                            const clipWidth = Math.max(12, clip.duration * pixelsPerSecond);
+                            const isSelected = clip.id === selectedMosaicClipId;
+                            return (
+                              <div
+                                key={clip.id}
+                                className={`clip-block video-clip mosaic-clip ${isSelected ? 'clip-selected' : ''}`}
+                                style={{ left: clipLeft, width: clipWidth }}
+                                onPointerDown={(event) => handleMosaicClipPointerDown(track.id, clip.id, event)}
+                                onPointerMove={handleMosaicClipPointerMove}
+                                onPointerUp={handleMosaicClipPointerUp}
+                                onPointerCancel={handleMosaicClipPointerUp}
+                                onContextMenu={(event) => {
+                                  event.preventDefault();
+                                  event.stopPropagation();
+                                  setContextMenu({ clipId: clip.id, kind: 'mosaic', trackId: track.id, x: event.clientX, y: event.clientY });
+                                }}
+                              >
+                                <div className="clip-handle" data-handle="start" />
+                                <div className="clip-label">
+                                  <span>{track.name}</span>
+                                  <small>{`${clip.duration.toFixed(2)}s`}</small>
+                                </div>
+                                <div className="clip-handle" data-handle="end" />
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
                 </div>
               </div>
             </section>
@@ -1307,8 +1792,32 @@ function App() {
           <button className="danger" type="button" onClick={removeActiveClip}>削除</button>
         </div>
       ) : null}
+
+      {contextMenu && contextMenuMosaicClip ? (
+        <div
+          ref={contextMenuRef}
+          className="context-menu"
+          style={{
+            left: contextMenuPosition?.left ?? contextMenuMargin,
+            top: contextMenuPosition?.top ?? contextMenuMargin,
+          }}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <button className="secondary" type="button" onClick={splitActiveClip}>再生ヘッドで分割</button>
+          <button className="secondary" type="button" onClick={joinActiveClip} disabled={!canJoinMenuClip()}>隣接クリップを結合</button>
+          <button className="danger" type="button" onClick={removeActiveClip}>削除</button>
+        </div>
+      ) : null}
     </main>
   );
 }
 
 export default App;
+
+
+
+
+
+
+
+

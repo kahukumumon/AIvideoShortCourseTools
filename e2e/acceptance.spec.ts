@@ -51,15 +51,15 @@ test("t04 add second audio track", async ({ page }) => {
   await page.waitForLoadState("networkidle");
   const allBtns = await page.locator("button").allTextContents();
   console.log("Buttons:", allBtns.join(", "));
-  const options = await page.locator("select option").count();
-  console.log("Select options before:", options);
+  const beforeTracks = await page.locator(".audio-track-block").count();
+  console.log("Audio tracks before:", beforeTracks);
   await page.getByRole("button", { name: "音声トラック追加" }).evaluate((el) => {
     (el as HTMLButtonElement).click();
   });
-  await expect.poll(async () => page.locator("select option").count()).toBeGreaterThanOrEqual(2);
-  const optionsAfter = await page.locator("select option").count();
-  console.log("Select options after:", optionsAfter);
-  expect(optionsAfter).toBeGreaterThanOrEqual(2);
+  await expect.poll(async () => page.locator(".audio-track-block").count()).toBeGreaterThan(beforeTracks);
+  const afterTracks = await page.locator(".audio-track-block").count();
+  console.log("Audio tracks after:", afterTracks);
+  expect(afterTracks).toBeGreaterThan(beforeTracks);
 });
 
 test("t05 timecode visible and timeline lanes", async ({ page }) => {

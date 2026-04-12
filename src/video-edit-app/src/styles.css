@@ -259,6 +259,13 @@
   margin-top: 10px;
 }
 
+.mosaic-help-text {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.6;
+}
+
 .lane-label {
   position: absolute;
   top: 8px;
@@ -305,6 +312,16 @@
   box-shadow:
     inset 0 0 0 1px rgba(198, 241, 255, 0.16),
     0 10px 22px rgba(8, 24, 35, 0.28);
+}
+
+.mosaic-lane {
+  cursor: default;
+}
+
+.mosaic-clip.clip-selected {
+  box-shadow:
+    inset 0 0 0 2px rgba(255, 188, 104, 0.78),
+    0 10px 24px rgba(126, 52, 22, 0.32);
 }
 
 .clip-ghost {
@@ -451,3 +468,4 @@
     justify-self: start;
   }
 }
+

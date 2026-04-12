@@ -2,8 +2,8 @@
 import { fetchFile } from '@ffmpeg/util';
 import coreURL from '@ffmpeg/core?url';
 import wasmURL from '@ffmpeg/core/wasm?url';
-import type { AudioTrack, BaseClip, ClipSegment, ExportProgress, MediaSourceItem, VideoClip } from '../types';
-import { clipDuration, dbToGain, getVisibleSegments, totalTimelineDuration } from './timeline';
+import type { AudioTrack, BaseClip, ClipSegment, ExportProgress, MediaSourceItem, MosaicTrack, VideoClip } from '../types';
+import { calcMosaicPixelSize, clipDuration, dbToGain, getVisibleSegments, totalTimelineDuration } from './timeline';
 
 let ffmpegPromise: Promise<FFmpeg> | null = null;
 
@@ -83,15 +83,73 @@ export function collectExportSources(videoSources: MediaSourceItem[], audioSourc
   return [...videoSources, ...audioSources];
 }
 
+/**
+ * モザイクトラックから ffmpeg の geq フィルタチェーンを生成する。
+ * 各モザイククリップを対象時間帯に楕円ピクセルモザイクとして合成する。
+ * @param mosaicTracks モザイクトラック一覧
+ * @param videoWidth  出力動画の幅
+ * @param videoHeight 出力動画の高さ
+ * @param inputLabel  適用前の映像ラベル
+ * @returns フィルタ文字列の配列と最終ラベル
+ */
+export function buildMosaicFilters(
+  mosaicTracks: MosaicTrack[],
+  videoWidth: number,
+  videoHeight: number,
+  inputLabel: string,
+): { filters: string[]; outputLabel: string } {
+  const allClips = mosaicTracks.flatMap((track) => track.clips);
+  if (allClips.length === 0) {
+    return { filters: [], outputLabel: inputLabel };
+  }
+
+  const longerSide = Math.max(videoWidth, videoHeight);
+  const ps = Math.max(1, Math.floor(calcMosaicPixelSize(longerSide)));
+  const filters: string[] = [];
+  let currentLabel = inputLabel;
+
+  allClips.forEach((clip, i) => {
+    const { cx, cy, rx, ry, angle } = clip.mask;
+    const startSec = clip.timelineStart.toFixed(6);
+    const endSec = (clip.timelineStart + clip.duration).toFixed(6);
+    const outLabel = `mosaicout${i}`;
+
+    // geq フィルタで楕円マスク内をピクセルモザイク化
+    // 楕円判定: ((X/W - cx)/rx)^2 + ((Y/H - cy)/ry)^2 <= 1
+    // 楕円内はブロック中心の画素値を使用
+    const cosA = Math.cos(angle || 0).toFixed(6);
+    const sinA = Math.sin(angle || 0).toFixed(6);
+    const dxExpr = `(X/W-${cx.toFixed(6)})`;
+    const dyExpr = `(Y/H-${cy.toFixed(6)})`;
+    const localXExpr = `((${dxExpr})*${cosA}+(${dyExpr})*${sinA})`;
+    const localYExpr = `(-(${dxExpr})*${sinA}+(${dyExpr})*${cosA})`;
+    const ellipseExpr = `pow(${localXExpr}/${rx > 0 ? rx.toFixed(6) : '0.001'},2)+pow(${localYExpr}/${ry > 0 ? ry.toFixed(6) : '0.001'},2)`;
+    const blockX = `(floor(X/${ps})*${ps}+${ps}/2)`;
+    const blockY = `(floor(Y/${ps})*${ps}+${ps}/2)`;
+
+    const lumExpr = `if(lte(${ellipseExpr},1),lum(${blockX},${blockY}),lum(X,Y))`;
+    const cbExpr  = `if(lte(${ellipseExpr},1),cb(${blockX},${blockY}),cb(X,Y))`;
+    const crExpr  = `if(lte(${ellipseExpr},1),cr(${blockX},${blockY}),cr(X,Y))`;
+
+    filters.push(
+      `[${currentLabel}]geq=lum='${lumExpr}':cb='${cbExpr}':cr='${crExpr}':enable='between(t,${startSec},${endSec})'[${outLabel}]`,
+    );
+    currentLabel = outLabel;
+  });
+
+  return { filters, outputLabel: currentLabel };
+}
+
 export async function exportTimelineToMp4(options: {
   videoClips: VideoClip[];
   audioTracks: AudioTrack[];
+  mosaicTracks?: MosaicTrack[];
   videoSources: MediaSourceItem[];
   audioSources: MediaSourceItem[];
   onProgress: (progress: ExportProgress) => void;
   onLog?: (message: string) => void;
 }) {
-  const { videoClips, audioTracks, videoSources, audioSources, onProgress, onLog } = options;
+  const { videoClips, audioTracks, mosaicTracks = [], videoSources, audioSources, onProgress, onLog } = options;
   const ffmpeg = await getFfmpeg(onProgress, onLog);
   const allAudioClips = audioTracks.flatMap((track) => track.clips);
   const duration = totalTimelineDuration(videoClips, allAudioClips);
@@ -219,7 +277,21 @@ export async function exportTimelineToMp4(options: {
     throw new Error('動画クリップがありません。');
   }
 
-  filters.push(`${videoLabels.join('')}concat=n=${videoLabels.length}:v=1:a=0[vout]`);
+  filters.push(`${videoLabels.join('')}concat=n=${videoLabels.length}:v=1:a=0[vconcat]`);
+
+  // モザイクフィルタを合成する（video の幅・高さは最初のクリップのソースから取得）
+  const firstVideoSource = videoClips.length > 0 ? sourceMap.get(videoClips[0].sourceId) : undefined;
+  const videoWidth = firstVideoSource?.width ?? 1280;
+  const videoHeight = firstVideoSource?.height ?? 720;
+  const { filters: mosaicFilters, outputLabel: vFinalLabel } = buildMosaicFilters(
+    mosaicTracks,
+    videoWidth,
+    videoHeight,
+    'vconcat',
+  );
+  for (const f of mosaicFilters) filters.push(f);
+  filters.push(`[${vFinalLabel}]null[vout]`);
+
   if (audioLabels.length > 0) {
     filters.push(`${audioLabels.join('')}amix=inputs=${audioLabels.length}:normalize=0:dropout_transition=0,atrim=duration=${duration}[aout]`);
   } else {

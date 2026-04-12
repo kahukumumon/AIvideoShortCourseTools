@@ -1,6 +1,27 @@
 ﻿import { describe, expect, it } from 'vitest';
-import { applyTrackVolume, canJoinPair, changeClipSpeed, clipDuration, clipEnd, deriveClipRmsGraph, joinClipWithNext, moveClip, resolveSegmentAtPlaytime, splitClip, totalTimelineDuration, trimClip } from '../lib/timeline';
-import type { AudioClip, VideoClip } from '../types';
+import {
+  addMosaicTrack,
+  applyTrackVolume,
+  calcMosaicPixelSize,
+  canJoinPair,
+  changeClipSpeed,
+  clipDuration,
+  clipEnd,
+  deleteMosaicClip,
+  deriveClipRmsGraph,
+  getActiveMosaicClips,
+  joinClipWithNext,
+  joinMosaicClipWithNext,
+  moveClip,
+  moveMosaicClip,
+  resolveSegmentAtPlaytime,
+  splitClip,
+  splitMosaicClip,
+  totalTimelineDuration,
+  trimMosaicClip,
+  trimClip,
+} from '../lib/timeline';
+import type { AudioClip, MosaicTrack, VideoClip } from '../types';
 
 const videoA: VideoClip = {
   id: 'v1',
@@ -258,6 +279,90 @@ describe('changeClipSpeed: 非破壊編集', () => {
   });
 });
 
+describe('mosaic timeline helpers', () => {
+  const baseTrack: MosaicTrack = {
+    id: 'm1',
+    name: 'モザイク 1',
+    clips: [
+      {
+        id: 'mc1',
+        timelineStart: 0,
+        duration: 2,
+        mask: { cx: 0.5, cy: 0.5, rx: 0.2, ry: 0.15, angle: 0 },
+      },
+      {
+        id: 'mc2',
+        timelineStart: 3,
+        duration: 2,
+        mask: { cx: 0.4, cy: 0.4, rx: 0.2, ry: 0.15, angle: 0 },
+      },
+    ],
+  };
+
+  it('moveMosaicClip keeps no-overlap placement', () => {
+    const moved = moveMosaicClip([baseTrack], 'm1', 'mc2', 1);
+    const track = moved[0];
+    const target = track.clips.find((c) => c.id === 'mc2');
+    expect(target?.timelineStart).toBe(2);
+  });
+
+  it('trimMosaicClip trims start edge with neighbor guard', () => {
+    const trimmed = trimMosaicClip([baseTrack], 'm1', 'mc2', 'start', 1);
+    const target = trimmed[0].clips.find((c) => c.id === 'mc2');
+    expect(target?.timelineStart).toBe(2);
+    expect(target?.duration).toBe(3);
+  });
+
+  it('trimMosaicClip trims end edge with neighbor guard', () => {
+    const trimmed = trimMosaicClip([baseTrack], 'm1', 'mc1', 'end', 4);
+    const target = trimmed[0].clips.find((c) => c.id === 'mc1');
+    expect(target?.duration).toBe(3);
+  });
+
+  it('splitMosaicClip splits clip at playhead', () => {
+    const split = splitMosaicClip([baseTrack], 'm1', 'mc1', 1);
+    expect(split[0].clips).toHaveLength(3);
+    const left = split[0].clips.find((c) => c.id === 'mc1');
+    const right = split[0].clips.find((c) => c.id !== 'mc1' && c.timelineStart === 1);
+    expect(left?.duration).toBe(1);
+    expect(right?.duration).toBe(1);
+  });
+
+  it('joinMosaicClipWithNext joins adjacent clips', () => {
+    const track: MosaicTrack = {
+      ...baseTrack,
+      clips: [
+        { ...baseTrack.clips[0], duration: 2 },
+        { ...baseTrack.clips[1], timelineStart: 2, duration: 1 },
+      ],
+    };
+    const joined = joinMosaicClipWithNext([track], 'm1', 'mc1');
+    expect(joined[0].clips).toHaveLength(1);
+    expect(joined[0].clips[0].duration).toBe(3);
+  });
+
+  it('deleteMosaicClip removes target clip', () => {
+    const deleted = deleteMosaicClip([baseTrack], 'm1', 'mc1');
+    expect(deleted[0].clips.map((c) => c.id)).toEqual(['mc2']);
+  });
+
+  it('getActiveMosaicClips returns clips for current time', () => {
+    const active = getActiveMosaicClips([baseTrack], 3.5);
+    expect(active).toHaveLength(1);
+    expect(active[0].clip.id).toBe('mc2');
+  });
+
+  it('calcMosaicPixelSize returns longer-side/100', () => {
+    expect(calcMosaicPixelSize(1920)).toBe(19.2);
+  });
+
+  it('addMosaicTrack appends a new empty track', () => {
+    const next = addMosaicTrack([baseTrack]);
+    expect(next).toHaveLength(2);
+    expect(next[1].clips).toEqual([]);
+  });
+});
+
 
 // ─── clipDuration: segments 対応 ────────────────────────────────────────
 
@@ -497,3 +602,4 @@ describe('moveClip: 空き区間への再配置', () => {
     expect(moved.find((clip) => clip.id === 'a3')?.timelineStart).toBe(4);
   });
 });
+
