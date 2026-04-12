@@ -115,15 +115,19 @@ export function buildMosaicFilters(
     const outLabel = `mosaicout${i}`;
 
     // geq フィルタで楕円マスク内をピクセルモザイク化
-    // 楕円判定: ((X/W - cx)/rx)^2 + ((Y/H - cy)/ry)^2 <= 1
+    // 楕円判定をピクセル座標で行い、プレビュー描画と同じ回転楕円になるようにする
     // 楕円内はブロック中心の画素値を使用
     const cosA = Math.cos(angle || 0).toFixed(6);
     const sinA = Math.sin(angle || 0).toFixed(6);
-    const dxExpr = `(X/W-${cx.toFixed(6)})`;
-    const dyExpr = `(Y/H-${cy.toFixed(6)})`;
+    const centerX = (cx * videoWidth).toFixed(6);
+    const centerY = (cy * videoHeight).toFixed(6);
+    const radiusX = Math.max(rx * videoWidth, 0.001).toFixed(6);
+    const radiusY = Math.max(ry * videoHeight, 0.001).toFixed(6);
+    const dxExpr = `(X-${centerX})`;
+    const dyExpr = `(Y-${centerY})`;
     const localXExpr = `((${dxExpr})*${cosA}+(${dyExpr})*${sinA})`;
     const localYExpr = `(-(${dxExpr})*${sinA}+(${dyExpr})*${cosA})`;
-    const ellipseExpr = `pow(${localXExpr}/${rx > 0 ? rx.toFixed(6) : '0.001'},2)+pow(${localYExpr}/${ry > 0 ? ry.toFixed(6) : '0.001'},2)`;
+    const ellipseExpr = `pow(${localXExpr}/${radiusX},2)+pow(${localYExpr}/${radiusY},2)`;
     const blockX = `(floor(X/${ps})*${ps}+${ps}/2)`;
     const blockY = `(floor(Y/${ps})*${ps}+${ps}/2)`;
 

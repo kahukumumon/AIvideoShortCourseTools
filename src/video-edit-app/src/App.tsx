@@ -117,6 +117,40 @@ function fadeGain(clip: VideoClip | AudioClip, currentTime: number) {
   return Math.max(0, Math.min(1, Number.isFinite(gain) ? gain : 1));
 }
 
+function getEllipseGeometry(mask: EllipseMask, width: number, height: number) {
+  const angle = mask.angle || 0;
+  return {
+    angle,
+    centerX: mask.cx * width,
+    centerY: mask.cy * height,
+    radiusX: mask.rx * width,
+    radiusY: mask.ry * height,
+    cosA: Math.cos(angle),
+    sinA: Math.sin(angle),
+  };
+}
+
+function isPointInEllipse(x: number, y: number, mask: EllipseMask, width: number, height: number) {
+  const { centerX, centerY, radiusX, radiusY, cosA, sinA } = getEllipseGeometry(mask, width, height);
+  const dx = x - centerX;
+  const dy = y - centerY;
+  const localX = dx * cosA + dy * sinA;
+  const localY = -dx * sinA + dy * cosA;
+  const ex = radiusX > 0 ? localX / radiusX : Number.POSITIVE_INFINITY;
+  const ey = radiusY > 0 ? localY / radiusY : Number.POSITIVE_INFINITY;
+  return ex * ex + ey * ey <= 1;
+}
+
+function getEllipseHandlePoints(mask: EllipseMask, width: number, height: number) {
+  const { centerX, centerY, radiusX, radiusY, cosA, sinA } = getEllipseGeometry(mask, width, height);
+  const right: [number, number] = [centerX + radiusX * cosA, centerY + radiusX * sinA];
+  const left: [number, number] = [centerX - radiusX * cosA, centerY - radiusX * sinA];
+  const down: [number, number] = [centerX - radiusY * sinA, centerY + radiusY * cosA];
+  const up: [number, number] = [centerX + radiusY * sinA, centerY - radiusY * cosA];
+  const rotate: [number, number] = [up[0] + (up[0] - centerX) * 0.35, up[1] + (up[1] - centerY) * 0.35];
+  return { center: [centerX, centerY] as [number, number], right, left, down, up, rotate };
+}
+
 function App() {
   const contextMenuMargin = 12;
   const initialTrack = useMemo(() => createAudioTrack(1), []);
@@ -957,21 +991,16 @@ function App() {
         const { data } = imageData;
 
         for (const { clip } of activeClips) {
-          const { cx, cy, rx, ry, angle } = clip.mask;
-          const cosA = Math.cos(angle || 0);
-          const sinA = Math.sin(angle || 0);
+          const { centerX, centerY, radiusX, radiusY, cosA, sinA } = getEllipseGeometry(clip.mask, w, h);
           for (let blockY = 0; blockY < h; blockY += ps) {
             for (let blockX = 0; blockX < w; blockX += ps) {
-              // ブロック中心の正規化座標
-              const nx = (blockX + ps / 2) / w;
-              const ny = (blockY + ps / 2) / h;
-              const dx = nx - cx;
-              const dy = ny - cy;
+              const dx = blockX + ps / 2 - centerX;
+              const dy = blockY + ps / 2 - centerY;
               // 楕円ローカル座標へ逆回転して判定
               const localX = dx * cosA + dy * sinA;
               const localY = -dx * sinA + dy * cosA;
-              const ex = rx > 0 ? localX / rx : 9999;
-              const ey = ry > 0 ? localY / ry : 9999;
+              const ex = radiusX > 0 ? localX / radiusX : 9999;
+              const ey = radiusY > 0 ? localY / radiusY : 9999;
               if (ex * ex + ey * ey > 1) continue;
 
               // ブロック内の平均色を計算
@@ -1013,29 +1042,18 @@ function App() {
 
     // 楕円のアウトライン（選択中はハンドル付き）を描画
     for (const { clip } of activeClips) {
-      const { cx, cy, rx, ry, angle } = clip.mask;
-      const px = cx * w;
-      const py = cy * h;
-      const prx = rx * w;
-      const pry = ry * h;
-      const cosA = Math.cos(angle || 0);
-      const sinA = Math.sin(angle || 0);
+      const { angle, centerX, centerY, radiusX, radiusY } = getEllipseGeometry(clip.mask, w, h);
+      const { center, right, left, down, up, rotate } = getEllipseHandlePoints(clip.mask, w, h);
 
       ctx.beginPath();
-      ctx.ellipse(px, py, prx, pry, angle || 0, 0, Math.PI * 2);
+      ctx.ellipse(centerX, centerY, radiusX, radiusY, angle, 0, Math.PI * 2);
       ctx.strokeStyle = clip.id === selectedMosaicClipId ? 'rgba(255,140,60,0.95)' : 'rgba(144,238,144,0.95)';
       ctx.lineWidth = clip.id === selectedMosaicClipId ? 2 : 1;
       ctx.stroke();
 
       if (clip.id === selectedMosaicClipId) {
-        // ハンドル（中心・4方向・回転）
-        const right: [number, number] = [px + prx * cosA, py + prx * sinA];
-        const left: [number, number] = [px - prx * cosA, py - prx * sinA];
-        const down: [number, number] = [px - pry * sinA, py + pry * cosA];
-        const up: [number, number] = [px + pry * sinA, py - pry * cosA];
-        const rotate: [number, number] = [up[0] + (up[0] - px) * 0.35, up[1] + (up[1] - py) * 0.35];
         const handles: Array<[number, number, boolean]> = [
-          [px, py, false],
+          [center[0], center[1], false],
           [right[0], right[1], false],
           [left[0], left[1], false],
           [down[0], down[1], false],
@@ -1071,8 +1089,8 @@ function App() {
     const canvas = mosaicCanvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
-    const mx = (event.clientX - rect.left) / rect.width;
-    const my = (event.clientY - rect.top) / rect.height;
+    const mx = ((event.clientX - rect.left) / rect.width) * canvas.width;
+    const my = ((event.clientY - rect.top) / rect.height) * canvas.height;
 
     const activeClips = getActiveMosaicClips(mosaicTracks, playhead);
     // 選択中クリップのハンドル判定を優先
@@ -1081,17 +1099,8 @@ function App() {
     );
 
     for (const { clip, track } of sorted) {
-      const { cx, cy, rx, ry, angle } = clip.mask;
-      const cosA = Math.cos(angle || 0);
-      const sinA = Math.sin(angle || 0);
-      const handleRadius = 0.02;
-
-      // ハンドル判定（正規化座標）
-      const right: [number, number] = [cx + rx * cosA, cy + rx * sinA];
-      const left: [number, number] = [cx - rx * cosA, cy - rx * sinA];
-      const down: [number, number] = [cx - ry * sinA, cy + ry * cosA];
-      const up: [number, number] = [cx + ry * sinA, cy - ry * cosA];
-      const rotate: [number, number] = [up[0] + (up[0] - cx) * 0.35, up[1] + (up[1] - cy) * 0.35];
+      const { center, right, left, down, up, rotate } = getEllipseHandlePoints(clip.mask, canvas.width, canvas.height);
+      const handleRadius = 12;
 
       const hitHandles: Array<[number, number, 'move' | 'resize-right' | 'resize-left' | 'resize-bottom' | 'resize-top' | 'rotate']> = [
         [right[0], right[1], 'resize-right'],
@@ -1099,11 +1108,11 @@ function App() {
         [down[0], down[1], 'resize-bottom'],
         [up[0], up[1], 'resize-top'],
         [rotate[0], rotate[1], 'rotate'],
-        [cx, cy, 'move'],
+        [center[0], center[1], 'move'],
       ];
 
       for (const [hx, hy, mode] of hitHandles) {
-        const dx = (mx - hx) * (rect.width / rect.height > 1 ? rect.width / rect.height : 1);
+        const dx = mx - hx;
         const dy = my - hy;
         if (Math.sqrt(dx * dx + dy * dy) <= handleRadius) {
           setSelectedMosaicClipId(clip.id);
@@ -1112,8 +1121,8 @@ function App() {
             clipId: clip.id,
             trackId: track.id,
             mode,
-            originX: mx,
-            originY: my,
+            originX: mx / canvas.width,
+            originY: my / canvas.height,
             initialMask: { ...clip.mask },
           };
           event.currentTarget.setPointerCapture(event.pointerId);
@@ -1123,21 +1132,15 @@ function App() {
       }
 
       // 回転楕円内クリックで選択
-      const dx = mx - cx;
-      const dy = my - cy;
-      const localX = dx * cosA + dy * sinA;
-      const localY = -dx * sinA + dy * cosA;
-      const ex = rx > 0 ? localX / rx : 9999;
-      const ey = ry > 0 ? localY / ry : 9999;
-      if (ex * ex + ey * ey <= 1) {
+      if (isPointInEllipse(mx, my, clip.mask, canvas.width, canvas.height)) {
         setSelectedMosaicClipId(clip.id);
         setSelectedMosaicTrackId(track.id);
         mosaicOverlayDragRef.current = {
           clipId: clip.id,
           trackId: track.id,
           mode: 'move',
-          originX: mx,
-          originY: my,
+          originX: mx / canvas.width,
+          originY: my / canvas.height,
           initialMask: { ...clip.mask },
         };
         event.currentTarget.setPointerCapture(event.pointerId);
@@ -1813,9 +1816,6 @@ function App() {
 }
 
 export default App;
-
-
-
 
 
 
