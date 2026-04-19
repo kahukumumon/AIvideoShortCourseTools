@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>pixivリサイズ | AI動画短期講座ツール</title>
+  <title>画像モザイク | AI動画短期講座ツール</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="../../assets/css/base.css">
   <link rel="stylesheet" href="./styles.css">
@@ -16,7 +16,7 @@
         <a class="topbar-link" href="../video_edit">動画編集</a>
         <a class="topbar-link" href="../concat">動画連結</a>
         <a class="topbar-link" href="../ugoira">うごイラ</a>
-        <a class="topbar-link" href="../mosaic">画像モザイク</a>
+        <a class="topbar-link" href="../pixiv">pixivリサイズ</a>
         <a class="topbar-link" href="../character">オリキャラ設定</a>
       </nav>
     </div>
@@ -24,42 +24,45 @@
     <section class="panel">
       <div class="panel-head">
         <div>
-          <span class="eyebrow">PIXIV RESIZE</span>
-          <h1>pixivリサイズ</h1>
+          <span class="eyebrow">IMAGE MOSAIC</span>
+          <h1>画像モザイク</h1>
           <p>
-            画像を読み込むと、長辺 900px のプレビューに正方形クロップ領域を重ねます。
-            領域はドラッグで移動、四隅でリサイズできます。
+            画像を読み込み、長辺 900px のプレビュー上に楕円または四角のモザイク領域を配置します。
+            書き出しは元画像サイズのまま保存します。
           </p>
         </div>
-        <p class="hint">ダウンロードでは選択領域を 900×900 へ書き出します。</p>
+        <p class="hint">領域内をドラッグで移動、ハンドルで拡大縮小、上の丸で回転できます。</p>
       </div>
 
-      <div class="grid">
+      <div class="grid mosaic-grid">
         <div class="subpanel">
           <h3>画像追加</h3>
-          <label class="dropzone" id="pixivDrop">
-            <input id="pixivInput" type="file" accept="image/*">
+          <label class="dropzone" id="mosaicDrop">
+            <input id="mosaicInput" type="file" accept="image/*">
             <span>
               <strong>画像をドロップ</strong>
               PNG / JPEG / WebP など一般的な画像を想定
             </span>
           </label>
-          <div class="controls">
-            <button class="primary" id="pixivDownload">リサイズ後をダウンロード</button>
-            <button class="secondary" id="pixivReset">領域をリセット</button>
+          <div class="controls mosaic-controls">
+            <button class="secondary" id="mosaicAddEllipse" type="button">楕円</button>
+            <button class="secondary" id="mosaicAddRect" type="button">四角</button>
+            <button class="ghost" id="mosaicDelete" type="button">選択を削除</button>
+            <button class="secondary" id="mosaicClear" type="button">全て削除</button>
+            <button class="primary" id="mosaicExport" type="button">エクスポート</button>
           </div>
           <div class="status-row">
-            <div class="status-card" id="pixivStatus">
+            <div class="status-card" id="mosaicStatus">
               <div class="status-text">画像を追加するとここにサイズ情報を表示します。</div>
             </div>
           </div>
         </div>
-        <div class="subpanel">
+        <div class="subpanel mosaic-preview-panel">
           <h3>プレビュー</h3>
           <div class="canvas-shell">
-            <canvas id="pixivCanvas" width="900" height="900"></canvas>
+            <canvas id="mosaicCanvas" width="900" height="620"></canvas>
           </div>
-          <p class="caption" id="pixivCaption">ドラッグで移動、四隅のハンドルで正方形の大きさを調整します。</p>
+          <p class="caption" id="mosaicCaption">楕円または四角を追加して、モザイクしたい位置へ調整します。</p>
         </div>
       </div>
     </section>

@@ -64,6 +64,12 @@
   --brand-soft: rgba(122, 90, 36, 0.12);
 }
 
+.tool-card-mosaic {
+  --brand: #356f55;
+  --brand-deep: #1e4b37;
+  --brand-soft: rgba(53, 111, 85, 0.12);
+}
+
 @media (max-width: 820px) {
   .tool-grid {
     grid-template-columns: 1fr;

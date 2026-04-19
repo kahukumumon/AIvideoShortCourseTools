@@ -36,6 +36,17 @@ const pixivState = {
   drag: null,
 };
 
+const mosaicState = {
+  file: null,
+  objectUrl: "",
+  image: null,
+  displayWidth: 900,
+  displayHeight: 620,
+  regions: [],
+  selectedId: null,
+  drag: null,
+};
+
 const characterDefaults = {
   hairStyle: "medium hair",
   hairExtra: "",
@@ -129,6 +140,8 @@ let concatEls = null;
 let ugoiraEls = null;
 let pixivEls = null;
 let pixivCtx = null;
+let mosaicEls = null;
+let mosaicCtx = null;
 let characterEls = null;
 
 function formatBytes(bytes) {
@@ -372,28 +385,35 @@ function setupDropzone(root, input, onFiles) {
   if (!window.__dropzoneRegistry) {
     window.__dropzoneRegistry = new Map();
   }
+  const getDropFiles = (event) => [...(event.dataTransfer?.files || [])];
+  const hasDroppedFiles = (event) => {
+    const types = [...(event.dataTransfer?.types || [])];
+    return types.includes("Files") || getDropFiles(event).length > 0;
+  };
   if (!window.__dropzoneListenersInstalled) {
     window.__dropzoneListenersInstalled = true;
     document.addEventListener(
       "dragover",
       (event) => {
-        event.preventDefault();
+        if (hasDroppedFiles(event)) {
+          event.preventDefault();
+        }
       },
       true
     );
     document.addEventListener(
       "drop",
       (event) => {
+        if (!hasDroppedFiles(event)) return;
+        event.preventDefault();
         const zone = event.target instanceof Element ? event.target.closest(".dropzone") : null;
         if (!zone) return;
         const entry = window.__dropzoneRegistry.get(zone);
         if (!entry) return;
         if (event.__dropzoneHandled) return;
         event.__dropzoneHandled = true;
-        event.preventDefault();
         event.stopPropagation();
-        const files = [...event.dataTransfer.files];
-        entry.onFiles(files);
+        entry.onFiles(getDropFiles(event));
       },
       true
     );
@@ -404,23 +424,28 @@ function setupDropzone(root, input, onFiles) {
 
   ["dragenter", "dragover"].forEach((eventName) => {
     root.addEventListener(eventName, (event) => {
+      if (!hasDroppedFiles(event)) return;
       event.preventDefault();
+      event.stopPropagation();
       activate();
-    });
+    }, true);
   });
 
   ["dragleave", "drop"].forEach((eventName) => {
     root.addEventListener(eventName, (event) => {
+      if (!hasDroppedFiles(event)) return;
       event.preventDefault();
+      event.stopPropagation();
       deactivate();
-    });
+    }, true);
   });
 
   root.addEventListener("drop", (event) => {
     if (event.__dropzoneHandled) return;
     event.__dropzoneHandled = true;
-    const files = [...event.dataTransfer.files];
-    onFiles(files);
+    event.preventDefault();
+    event.stopPropagation();
+    onFiles(getDropFiles(event));
   });
 
   input.addEventListener("change", () => {
@@ -989,6 +1014,315 @@ async function setPixivFile(file) {
   );
 }
 
+function getMosaicSelectedRegion() {
+  return mosaicState.regions.find((region) => region.id === mosaicState.selectedId) || null;
+}
+
+function getMosaicPixelSize(width, height) {
+  return Math.max(1, Math.round(Math.max(width, height) / 100));
+}
+
+function getMosaicPoint(event) {
+  const rect = mosaicEls.canvas.getBoundingClientRect();
+  return {
+    x: (event.clientX - rect.left) * (mosaicEls.canvas.width / rect.width),
+    y: (event.clientY - rect.top) * (mosaicEls.canvas.height / rect.height),
+  };
+}
+
+function rotatePoint(point, angle) {
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  return {
+    x: point.x * cos - point.y * sin,
+    y: point.x * sin + point.y * cos,
+  };
+}
+
+function toMosaicLocal(region, point) {
+  return rotatePoint({ x: point.x - region.cx, y: point.y - region.cy }, -region.rotation);
+}
+
+function isPointInMosaicRegion(region, point) {
+  const local = toMosaicLocal(region, point);
+  if (region.type === "ellipse") {
+    const rx = Math.max(1, region.width / 2);
+    const ry = Math.max(1, region.height / 2);
+    return (local.x * local.x) / (rx * rx) + (local.y * local.y) / (ry * ry) <= 1;
+  }
+  return Math.abs(local.x) <= region.width / 2 && Math.abs(local.y) <= region.height / 2;
+}
+
+function getMosaicHandles(region) {
+  const halfW = region.width / 2;
+  const halfH = region.height / 2;
+  const corners = [
+    { key: "nw", localX: -halfW, localY: -halfH },
+    { key: "ne", localX: halfW, localY: -halfH },
+    { key: "se", localX: halfW, localY: halfH },
+    { key: "sw", localX: -halfW, localY: halfH },
+  ].map((handle) => {
+    const rotated = rotatePoint({ x: handle.localX, y: handle.localY }, region.rotation);
+    return { ...handle, x: region.cx + rotated.x, y: region.cy + rotated.y };
+  });
+  const rotateLocal = { x: 0, y: -halfH - 36 };
+  const rotateHandle = rotatePoint(rotateLocal, region.rotation);
+  return [
+    ...corners,
+    { key: "rotate", localX: rotateLocal.x, localY: rotateLocal.y, x: region.cx + rotateHandle.x, y: region.cy + rotateHandle.y },
+  ];
+}
+
+function hitMosaicRegion(point) {
+  const selected = getMosaicSelectedRegion();
+  if (selected) {
+    for (const handle of getMosaicHandles(selected)) {
+      if (Math.hypot(point.x - handle.x, point.y - handle.y) <= 14) {
+        return { type: handle.key === "rotate" ? "rotate" : "resize", region: selected, handle: handle.key };
+      }
+    }
+  }
+
+  for (let i = mosaicState.regions.length - 1; i >= 0; i -= 1) {
+    const region = mosaicState.regions[i];
+    if (isPointInMosaicRegion(region, point)) {
+      return { type: "move", region };
+    }
+  }
+  return null;
+}
+
+function applyMosaicClip(context, region) {
+  context.translate(region.cx, region.cy);
+  context.rotate(region.rotation);
+  context.beginPath();
+  if (region.type === "ellipse") {
+    context.ellipse(0, 0, region.width / 2, region.height / 2, 0, 0, Math.PI * 2);
+  } else {
+    context.rect(-region.width / 2, -region.height / 2, region.width, region.height);
+  }
+  context.clip();
+  context.setTransform(1, 0, 0, 1, 0, 0);
+}
+
+function getRegionBounds(region, canvasWidth, canvasHeight) {
+  const halfW = region.width / 2;
+  const halfH = region.height / 2;
+  const points = [
+    { x: -halfW, y: -halfH },
+    { x: halfW, y: -halfH },
+    { x: halfW, y: halfH },
+    { x: -halfW, y: halfH },
+  ].map((point) => {
+    const rotated = rotatePoint(point, region.rotation);
+    return { x: region.cx + rotated.x, y: region.cy + rotated.y };
+  });
+  const minX = clamp(Math.floor(Math.min(...points.map((point) => point.x))), 0, canvasWidth);
+  const minY = clamp(Math.floor(Math.min(...points.map((point) => point.y))), 0, canvasHeight);
+  const maxX = clamp(Math.ceil(Math.max(...points.map((point) => point.x))), 0, canvasWidth);
+  const maxY = clamp(Math.ceil(Math.max(...points.map((point) => point.y))), 0, canvasHeight);
+  return { x: minX, y: minY, width: Math.max(1, maxX - minX), height: Math.max(1, maxY - minY) };
+}
+
+function drawPixelMosaic(context, sourceCanvas, region, pixelSize) {
+  const bounds = getRegionBounds(region, sourceCanvas.width, sourceCanvas.height);
+  const smallWidth = Math.max(1, Math.ceil(bounds.width / pixelSize));
+  const smallHeight = Math.max(1, Math.ceil(bounds.height / pixelSize));
+  const temp = document.createElement("canvas");
+  temp.width = smallWidth;
+  temp.height = smallHeight;
+  const tempCtx = temp.getContext("2d", { alpha: false });
+  tempCtx.imageSmoothingEnabled = false;
+  tempCtx.drawImage(sourceCanvas, bounds.x, bounds.y, bounds.width, bounds.height, 0, 0, smallWidth, smallHeight);
+
+  context.save();
+  applyMosaicClip(context, region);
+  context.imageSmoothingEnabled = false;
+  context.drawImage(temp, 0, 0, smallWidth, smallHeight, bounds.x, bounds.y, bounds.width, bounds.height);
+  context.restore();
+  context.imageSmoothingEnabled = true;
+}
+
+function renderMosaicImage(targetCanvas, regions, sourceImage, width, height) {
+  targetCanvas.width = width;
+  targetCanvas.height = height;
+  const context = targetCanvas.getContext("2d", { alpha: true });
+  context.clearRect(0, 0, width, height);
+  context.drawImage(sourceImage, 0, 0, width, height);
+
+  if (regions.length === 0) return context;
+
+  const sourceCanvas = document.createElement("canvas");
+  sourceCanvas.width = width;
+  sourceCanvas.height = height;
+  const sourceCtx = sourceCanvas.getContext("2d", { alpha: true });
+  sourceCtx.drawImage(sourceImage, 0, 0, width, height);
+  const pixelSize = getMosaicPixelSize(width, height);
+  regions.forEach((region) => drawPixelMosaic(context, sourceCanvas, region, pixelSize));
+  return context;
+}
+
+function drawMosaicOverlay(context) {
+  const selected = getMosaicSelectedRegion();
+  context.save();
+  mosaicState.regions.forEach((region) => {
+    context.save();
+    context.translate(region.cx, region.cy);
+    context.rotate(region.rotation);
+    context.strokeStyle = region.id === mosaicState.selectedId ? "#ffe45c" : "rgba(255, 255, 255, 0.9)";
+    context.lineWidth = region.id === mosaicState.selectedId ? 3 : 2;
+    context.shadowColor = "rgba(15, 20, 18, 0.8)";
+    context.shadowBlur = 10;
+    context.beginPath();
+    if (region.type === "ellipse") {
+      context.ellipse(0, 0, region.width / 2, region.height / 2, 0, 0, Math.PI * 2);
+    } else {
+      context.rect(-region.width / 2, -region.height / 2, region.width, region.height);
+    }
+    context.stroke();
+    context.restore();
+  });
+
+  if (selected) {
+    const handles = getMosaicHandles(selected);
+    const topHandle = handles.find((handle) => handle.key === "rotate");
+    const topCenter = rotatePoint({ x: 0, y: -selected.height / 2 }, selected.rotation);
+    context.strokeStyle = "rgba(255, 228, 92, 0.86)";
+    context.lineWidth = 1.5;
+    context.beginPath();
+    context.moveTo(selected.cx + topCenter.x, selected.cy + topCenter.y);
+    context.lineTo(topHandle.x, topHandle.y);
+    context.stroke();
+    handles.forEach((handle) => {
+      context.beginPath();
+      context.fillStyle = handle.key === "rotate" ? "#f8faf7" : "#ffe45c";
+      context.strokeStyle = "#1f2631";
+      context.lineWidth = 1.5;
+      context.arc(handle.x, handle.y, handle.key === "rotate" ? 7 : 6, 0, Math.PI * 2);
+      context.fill();
+      context.stroke();
+    });
+  }
+  context.restore();
+}
+
+function drawMosaicCanvas() {
+  if (!mosaicEls?.canvas || !mosaicCtx) return;
+  const { image, displayWidth, displayHeight } = mosaicState;
+  mosaicEls.canvas.width = displayWidth;
+  mosaicEls.canvas.height = displayHeight;
+  mosaicCtx.clearRect(0, 0, displayWidth, displayHeight);
+
+  if (!image) {
+    mosaicCtx.fillStyle = "#f1e7d8";
+    mosaicCtx.fillRect(0, 0, displayWidth, displayHeight);
+    mosaicCtx.fillStyle = "#7b6e61";
+    mosaicCtx.font = "18px Avenir Next, Hiragino Sans, Yu Gothic UI, sans-serif";
+    mosaicCtx.textAlign = "center";
+    mosaicCtx.fillText("画像を追加するとここにプレビューを表示します。", displayWidth / 2, displayHeight / 2);
+    return;
+  }
+
+  renderMosaicImage(mosaicEls.canvas, mosaicState.regions, image, displayWidth, displayHeight);
+  mosaicCtx = mosaicEls.canvas.getContext("2d", { alpha: true });
+  drawMosaicOverlay(mosaicCtx);
+  const pixelSize = getMosaicPixelSize(image.naturalWidth, image.naturalHeight);
+  mosaicEls.caption.textContent = `モザイク領域: ${mosaicState.regions.length} 件 / ピクセルサイズ: ${pixelSize}px`;
+}
+
+function addMosaicRegion(type) {
+  if (!mosaicState.image) {
+    setStatus(mosaicEls.status, "先に画像を追加してください。", "error");
+    return;
+  }
+  const base = Math.max(90, Math.min(mosaicState.displayWidth, mosaicState.displayHeight) * 0.28);
+  const region = {
+    id: crypto.randomUUID(),
+    type,
+    cx: mosaicState.displayWidth / 2,
+    cy: mosaicState.displayHeight / 2,
+    width: Math.round(type === "ellipse" ? base * 1.35 : base * 1.2),
+    height: Math.round(base),
+    rotation: 0,
+  };
+  mosaicState.regions.push(region);
+  mosaicState.selectedId = region.id;
+  drawMosaicCanvas();
+}
+
+async function setMosaicFile(file) {
+  if (!(file instanceof File) || !mosaicEls) return;
+  if (mosaicState.objectUrl) URL.revokeObjectURL(mosaicState.objectUrl);
+  mosaicState.file = file;
+  mosaicState.objectUrl = URL.createObjectURL(file);
+  const image = new Image();
+  image.src = mosaicState.objectUrl;
+  await image.decode();
+  mosaicState.image = image;
+  const longest = Math.max(image.naturalWidth, image.naturalHeight);
+  const scale = longest > 0 ? Math.min(1, 900 / longest) : 1;
+  mosaicState.displayWidth = Math.max(1, Math.round(image.naturalWidth * scale));
+  mosaicState.displayHeight = Math.max(1, Math.round(image.naturalHeight * scale));
+  mosaicState.regions = [];
+  mosaicState.selectedId = null;
+  drawMosaicCanvas();
+  setStatus(
+    mosaicEls.status,
+    `${file.name} / 元画像 ${image.naturalWidth}×${image.naturalHeight} / プレビュー ${mosaicState.displayWidth}×${mosaicState.displayHeight} / モザイク ${getMosaicPixelSize(image.naturalWidth, image.naturalHeight)}px`,
+    "default"
+  );
+}
+
+function updateMosaicDrag(point) {
+  const drag = mosaicState.drag;
+  if (!drag) return;
+  const region = drag.region;
+  if (drag.type === "move") {
+    region.cx = clamp(drag.origin.cx + point.x - drag.startPoint.x, 0, mosaicState.displayWidth);
+    region.cy = clamp(drag.origin.cy + point.y - drag.startPoint.y, 0, mosaicState.displayHeight);
+  } else if (drag.type === "rotate") {
+    const startAngle = Math.atan2(drag.startPoint.y - drag.origin.cy, drag.startPoint.x - drag.origin.cx);
+    const nextAngle = Math.atan2(point.y - drag.origin.cy, point.x - drag.origin.cx);
+    region.rotation = drag.origin.rotation + nextAngle - startAngle;
+  } else if (drag.type === "resize") {
+    const local = toMosaicLocal(drag.origin, point);
+    const signX = drag.handle.includes("w") ? -1 : 1;
+    const signY = drag.handle.includes("n") ? -1 : 1;
+    const minSize = 32;
+    region.width = Math.max(minSize, Math.abs(local.x) * 2);
+    region.height = Math.max(minSize, Math.abs(local.y) * 2);
+    const centerLocal = {
+      x: (local.x - signX * drag.origin.width / 2) / 2,
+      y: (local.y - signY * drag.origin.height / 2) / 2,
+    };
+    const centerShift = rotatePoint(centerLocal, drag.origin.rotation);
+    region.cx = clamp(drag.origin.cx + centerShift.x, 0, mosaicState.displayWidth);
+    region.cy = clamp(drag.origin.cy + centerShift.y, 0, mosaicState.displayHeight);
+  }
+  drawMosaicCanvas();
+}
+
+async function exportMosaicImage() {
+  if (!mosaicState.image || !mosaicState.file) {
+    setStatus(mosaicEls.status, "先に画像を追加してください。", "error");
+    return;
+  }
+  const scale = mosaicState.image.naturalWidth / mosaicState.displayWidth;
+  const outputRegions = mosaicState.regions.map((region) => ({
+    ...region,
+    cx: region.cx * scale,
+    cy: region.cy * scale,
+    width: region.width * scale,
+    height: region.height * scale,
+  }));
+  const outputCanvas = document.createElement("canvas");
+  renderMosaicImage(outputCanvas, outputRegions, mosaicState.image, mosaicState.image.naturalWidth, mosaicState.image.naturalHeight);
+  const blob = await new Promise((resolve) => outputCanvas.toBlob(resolve, "image/jpeg", 0.95));
+  const outputName = `${sanitizeBaseName(mosaicState.file.name)}-mosaic.jpg`;
+  downloadBlob(blob, outputName);
+  setStatus(mosaicEls.status, `${outputName} を原寸 ${outputCanvas.width}×${outputCanvas.height} でダウンロードしました。`, "success");
+}
+
 function initConcatTool() {
   const input = document.getElementById("concatInput");
   if (!input) return;
@@ -1336,6 +1670,115 @@ function initPixivTool() {
   drawPixivCanvas();
 }
 
+function initMosaicTool() {
+  const canvas = document.getElementById("mosaicCanvas");
+  if (!canvas) return;
+
+  mosaicEls = {
+    input: document.getElementById("mosaicInput"),
+    drop: document.getElementById("mosaicDrop"),
+    canvas,
+    status: document.getElementById("mosaicStatus"),
+    caption: document.getElementById("mosaicCaption"),
+    addEllipse: document.getElementById("mosaicAddEllipse"),
+    addRect: document.getElementById("mosaicAddRect"),
+    delete: document.getElementById("mosaicDelete"),
+    clear: document.getElementById("mosaicClear"),
+    export: document.getElementById("mosaicExport"),
+  };
+  mosaicCtx = mosaicEls.canvas.getContext("2d", { alpha: true });
+
+  mosaicEls.canvas.addEventListener("pointerdown", (event) => {
+    if (!mosaicState.image) return;
+    const point = getMosaicPoint(event);
+    const hit = hitMosaicRegion(point);
+    if (!hit) {
+      mosaicState.selectedId = null;
+      mosaicState.drag = null;
+      drawMosaicCanvas();
+      return;
+    }
+    mosaicState.selectedId = hit.region.id;
+    mosaicState.drag = {
+      type: hit.type,
+      handle: hit.handle || "",
+      region: hit.region,
+      startPoint: point,
+      origin: { ...hit.region },
+    };
+    mosaicEls.canvas.setPointerCapture(event.pointerId);
+    drawMosaicCanvas();
+  });
+
+  mosaicEls.canvas.addEventListener("pointermove", (event) => {
+    if (!mosaicState.drag) return;
+    updateMosaicDrag(getMosaicPoint(event));
+  });
+
+  ["pointerup", "pointercancel", "pointerleave"].forEach((eventName) => {
+    mosaicEls.canvas.addEventListener(eventName, () => {
+      mosaicState.drag = null;
+    });
+  });
+
+  mosaicEls.addEllipse.addEventListener("click", () => addMosaicRegion("ellipse"));
+  mosaicEls.addRect.addEventListener("click", () => addMosaicRegion("rect"));
+  mosaicEls.delete.addEventListener("click", () => {
+    if (!mosaicState.selectedId) return;
+    mosaicState.regions = mosaicState.regions.filter((region) => region.id !== mosaicState.selectedId);
+    mosaicState.selectedId = null;
+    drawMosaicCanvas();
+  });
+  mosaicEls.clear.addEventListener("click", () => {
+    mosaicState.regions = [];
+    mosaicState.selectedId = null;
+    drawMosaicCanvas();
+  });
+  mosaicEls.export.addEventListener("click", () => {
+    exportMosaicImage().catch((error) => {
+      setStatus(mosaicEls.status, `エクスポートに失敗しました。${error.message || error}`, "error");
+    });
+  });
+
+  setupDropzone(mosaicEls.drop, mosaicEls.input, (files) => {
+    if (files[0]) {
+      setMosaicFile(files[0]).catch((error) => {
+        setStatus(mosaicEls.status, error.message || String(error), "error");
+      });
+    }
+  });
+
+  document.addEventListener("dragover", (event) => {
+    if (![...(event.dataTransfer?.types || [])].includes("Files")) return;
+    event.preventDefault();
+    mosaicEls.drop.classList.add("dragging");
+  });
+
+  document.addEventListener("dragleave", (event) => {
+    if (event.relatedTarget) return;
+    mosaicEls.drop.classList.remove("dragging");
+  });
+
+  document.addEventListener("drop", (event) => {
+    if (event.__dropzoneHandled) return;
+    const files = [...(event.dataTransfer?.files || [])];
+    if (files.length === 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    mosaicEls.drop.classList.remove("dragging");
+    const imageFile = files.find((file) => file.type.startsWith("image/"));
+    if (!imageFile) {
+      setStatus(mosaicEls.status, "画像ファイルをドロップしてください。", "error");
+      return;
+    }
+    setMosaicFile(imageFile).catch((error) => {
+      setStatus(mosaicEls.status, error.message || String(error), "error");
+    });
+  }, true);
+
+  drawMosaicCanvas();
+}
+
 function initCharacterTool() {
   const hairStyle = document.getElementById("characterHairStyle");
   if (!hairStyle) return;
@@ -1399,4 +1842,5 @@ initProtocolWarning();
 initConcatTool();
 initUgoiraTool();
 initPixivTool();
+initMosaicTool();
 initCharacterTool();
