@@ -1143,14 +1143,19 @@ async function decodeImageForCanvas(file) {
 
 async function canvasToMetadataBlob(canvas, format) {
   const quality = Math.max(0.01, Math.min(1, (Number(metadataEls.quality.value) || 92) / 100));
+  let blob = null;
   if (format.mimeType === "image/png" && window.pako) {
-    return canvasToCompressedPngBlob(canvas, getMetadataPngCompressionLevel());
+    blob = canvasToCompressedPngBlob(canvas, getMetadataPngCompressionLevel());
+  } else {
+    blob = await new Promise((resolve) => {
+      canvas.toBlob(resolve, format.mimeType, format.supportsQuality ? quality : undefined);
+    });
   }
-  const blob = await new Promise((resolve) => {
-    canvas.toBlob(resolve, format.mimeType, format.supportsQuality ? quality : undefined);
-  });
   if (!blob) {
     throw new Error(`${format.ext.toUpperCase()} 変換に失敗しました。`);
+  }
+  if (format.mimeType === "image/png") {
+    return stripPngMetadataBlob(blob);
   }
   return blob;
 }
@@ -1205,6 +1210,84 @@ function makePngChunk(type, data = new Uint8Array()) {
   chunk.set(data, 8);
   writeUint32BE(chunk, 8 + data.length, crc32(concatBytes([typeBytes, data])));
   return chunk;
+}
+
+async function readBlobBytes(blob) {
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
+function isPngSignature(bytes) {
+  const signature = [137, 80, 78, 71, 13, 10, 26, 10];
+  return bytes.length >= signature.length && signature.every((byte, index) => bytes[index] === byte);
+}
+
+function getPngChunkType(bytes, offset) {
+  return String.fromCharCode(bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7]);
+}
+
+function isCriticalPngChunk(type) {
+  return (type.charCodeAt(0) & 32) === 0;
+}
+
+function parsePngChunks(bytes) {
+  if (!isPngSignature(bytes)) {
+    throw new Error("PNG 検査に失敗しました。PNG シグネチャが不正です。");
+  }
+
+  const chunks = [];
+  let offset = 8;
+  while (offset + 12 <= bytes.length) {
+    const length =
+      bytes[offset] * 0x1000000 +
+      bytes[offset + 1] * 0x10000 +
+      bytes[offset + 2] * 0x100 +
+      bytes[offset + 3];
+    const end = offset + 12 + length;
+    if (end > bytes.length) {
+      throw new Error("PNG 検査に失敗しました。チャンク長が不正です。");
+    }
+
+    const type = getPngChunkType(bytes, offset);
+    chunks.push({ type, length, offset, end, critical: isCriticalPngChunk(type) });
+    offset = end;
+    if (type === "IEND") break;
+  }
+
+  const hasIend = chunks.some((chunk) => chunk.type === "IEND");
+  if (!hasIend) {
+    throw new Error("PNG 検査に失敗しました。IEND チャンクがありません。");
+  }
+
+  return {
+    chunks,
+    bytesAfterIend: Math.max(0, bytes.length - offset),
+  };
+}
+
+async function stripPngMetadataBlob(blob) {
+  const bytes = await readBlobBytes(blob);
+  const parsed = parsePngChunks(bytes);
+  const kept = [bytes.slice(0, 8)];
+
+  parsed.chunks.forEach((chunk) => {
+    if (chunk.critical) {
+      kept.push(bytes.slice(chunk.offset, chunk.end));
+    }
+  });
+
+  return new Blob([concatBytes(kept)], { type: "image/png" });
+}
+
+async function inspectPngMetadataBlob(blob) {
+  const bytes = await readBlobBytes(blob);
+  const parsed = parsePngChunks(bytes);
+  const ancillaryChunks = parsed.chunks.filter((chunk) => !chunk.critical);
+  const chunkSummary = parsed.chunks.map((chunk) => chunk.type).join("/");
+  return {
+    chunkSummary,
+    ancillaryChunks,
+    bytesAfterIend: parsed.bytesAfterIend,
+  };
 }
 
 function paethPredictor(left, up, upLeft) {
@@ -1368,6 +1451,14 @@ async function runMetadataConversion() {
       metadataState.outputs.push(output);
       renderMetadataPreview();
       appendLog(metadataEls.log, `出力: ${output.name} / ${formatBytesWithExact(output.blob.size)}`);
+      if (format.mimeType === "image/png") {
+        const pngInspection = await inspectPngMetadataBlob(output.blob);
+        const metadataNote =
+          pngInspection.ancillaryChunks.length === 0 && pngInspection.bytesAfterIend === 0
+            ? "pnginfoなし"
+            : `追加チャンク ${pngInspection.ancillaryChunks.map((chunk) => chunk.type).join(",") || "なし"} / IEND後 ${pngInspection.bytesAfterIend} B`;
+        appendLog(metadataEls.log, `PNG検査: ${pngInspection.chunkSummary} / ${metadataNote}`);
+      }
       setProgress(metadataEls.progress, (i + 1) / metadataState.files.length);
     }
     metadataEls.zip.disabled = metadataState.outputs.length === 0;
