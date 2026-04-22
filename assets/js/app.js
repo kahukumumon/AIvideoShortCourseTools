@@ -47,6 +47,13 @@ const mosaicState = {
   drag: null,
 };
 
+const metadataState = {
+  files: [],
+  outputs: [],
+  busy: false,
+  cancelRequested: false,
+};
+
 const characterDefaults = {
   hairStyle: "medium hair",
   hairExtra: "",
@@ -142,6 +149,7 @@ let pixivEls = null;
 let pixivCtx = null;
 let mosaicEls = null;
 let mosaicCtx = null;
+let metadataEls = null;
 let characterEls = null;
 
 function formatBytes(bytes) {
@@ -150,6 +158,10 @@ function formatBytes(bytes) {
   const idx = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
   const value = bytes / 1024 ** idx;
   return `${value.toFixed(value >= 10 || idx === 0 ? 0 : 1)} ${units[idx]}`;
+}
+
+function formatBytesWithExact(bytes) {
+  return `${formatBytes(bytes)} (${Math.max(0, Number(bytes) || 0).toLocaleString("ja-JP")} B)`;
 }
 
 function formatSeconds(value) {
@@ -1014,6 +1026,396 @@ async function setPixivFile(file) {
   );
 }
 
+function getMetadataFormat() {
+  const mimeType = metadataEls?.format?.value || "image/jpeg";
+  if (mimeType === "image/png") return { mimeType, ext: "png", supportsQuality: false };
+  if (mimeType === "image/webp") return { mimeType, ext: "webp", supportsQuality: true };
+  return { mimeType: "image/jpeg", ext: "jpg", supportsQuality: true };
+}
+
+function getMetadataZipOptions() {
+  return { compression: "STORE" };
+}
+
+function getMetadataPngCompressionLevel() {
+  const compression = metadataEls?.compression?.value || "png-medium";
+  if (compression === "png-low") return 1;
+  if (compression === "png-high") return 9;
+  return 6;
+}
+
+function updateMetadataControls() {
+  if (!metadataEls) return;
+  const format = getMetadataFormat();
+  const quality = Math.max(1, Math.min(100, Number(metadataEls.quality.value) || 92));
+  metadataEls.qualityValue.textContent = String(quality);
+  metadataEls.qualityField.hidden = !format.supportsQuality;
+  metadataEls.compressionField.hidden = format.mimeType !== "image/png";
+  const totalSize = metadataState.files.reduce((sum, file) => sum + file.size, 0);
+  const optionText = format.supportsQuality
+    ? `品質 ${quality}`
+    : `圧縮 ${metadataEls.compression.selectedOptions[0]?.textContent || "png標準"}`;
+  setStatus(
+    metadataEls.status,
+    `${metadataState.files.length} 枚 / 合計 ${formatBytes(totalSize)} / ${format.ext.toUpperCase()} / ${optionText}`,
+    metadataState.files.length > 0 ? "default" : "default"
+  );
+}
+
+function clearMetadataOutputs() {
+  metadataState.outputs.forEach((item) => URL.revokeObjectURL(item.url));
+  metadataState.outputs = [];
+}
+
+function setMetadataFiles(files) {
+  if (!metadataEls) return;
+  const images = files.filter((file) => file.type.startsWith("image/"));
+  metadataState.files = images;
+  clearMetadataOutputs();
+  renderMetadataPreview();
+  setProgress(metadataEls.progress, 0);
+  metadataEls.zip.disabled = true;
+  appendLog(metadataEls.log, `${images.length} 枚の画像を読み込みました。`);
+  updateMetadataControls();
+  if (files.length !== images.length) {
+    setStatus(metadataEls.status, "画像以外のファイルを除外しました。", "error");
+  }
+}
+
+function renderMetadataPreview() {
+  if (!metadataEls?.preview) return;
+  metadataEls.preview.innerHTML = "";
+  if (metadataState.outputs.length === 0) {
+    metadataEls.preview.innerHTML = '<div class="empty">変換後のプレビューがここに並びます。</div>';
+    return;
+  }
+
+  metadataState.outputs.forEach((item) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "metadata-tile";
+    button.dataset.id = item.id;
+
+    const image = document.createElement("img");
+    image.src = item.url;
+    image.alt = item.name;
+    image.loading = "lazy";
+
+    const title = document.createElement("span");
+    title.className = "metadata-tile-title";
+    title.textContent = item.name;
+
+    const meta = document.createElement("span");
+    meta.className = "metadata-tile-meta";
+    meta.textContent = `${formatBytesWithExact(item.originalSize)} -> ${formatBytesWithExact(item.blob.size)}`;
+
+    button.append(image, title, meta);
+    metadataEls.preview.append(button);
+  });
+}
+
+function getMetadataOutputName(file, format) {
+  return `${sanitizeBaseName(file.name)}-metadata.${format.ext}`;
+}
+
+async function decodeImageForCanvas(file) {
+  if (window.createImageBitmap) {
+    return {
+      image: await createImageBitmap(file),
+      close() {
+        this.image.close?.();
+      },
+    };
+  }
+
+  const url = URL.createObjectURL(file);
+  const image = new Image();
+  image.decoding = "async";
+  image.src = url;
+  await image.decode();
+  return {
+    image,
+    close() {
+      URL.revokeObjectURL(url);
+    },
+  };
+}
+
+async function canvasToMetadataBlob(canvas, format) {
+  const quality = Math.max(0.01, Math.min(1, (Number(metadataEls.quality.value) || 92) / 100));
+  if (format.mimeType === "image/png" && window.pako) {
+    return canvasToCompressedPngBlob(canvas, getMetadataPngCompressionLevel());
+  }
+  const blob = await new Promise((resolve) => {
+    canvas.toBlob(resolve, format.mimeType, format.supportsQuality ? quality : undefined);
+  });
+  if (!blob) {
+    throw new Error(`${format.ext.toUpperCase()} 変換に失敗しました。`);
+  }
+  return blob;
+}
+
+let pngCrcTable = null;
+
+function getPngCrcTable() {
+  if (pngCrcTable) return pngCrcTable;
+  pngCrcTable = new Uint32Array(256);
+  for (let i = 0; i < 256; i += 1) {
+    let value = i;
+    for (let bit = 0; bit < 8; bit += 1) {
+      value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+    }
+    pngCrcTable[i] = value >>> 0;
+  }
+  return pngCrcTable;
+}
+
+function crc32(bytes) {
+  const table = getPngCrcTable();
+  let crc = 0xffffffff;
+  for (let i = 0; i < bytes.length; i += 1) {
+    crc = table[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function writeUint32BE(target, offset, value) {
+  target[offset] = (value >>> 24) & 0xff;
+  target[offset + 1] = (value >>> 16) & 0xff;
+  target[offset + 2] = (value >>> 8) & 0xff;
+  target[offset + 3] = value & 0xff;
+}
+
+function concatBytes(chunks) {
+  const size = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  const result = new Uint8Array(size);
+  let offset = 0;
+  chunks.forEach((chunk) => {
+    result.set(chunk, offset);
+    offset += chunk.length;
+  });
+  return result;
+}
+
+function makePngChunk(type, data = new Uint8Array()) {
+  const typeBytes = new TextEncoder().encode(type);
+  const chunk = new Uint8Array(12 + data.length);
+  writeUint32BE(chunk, 0, data.length);
+  chunk.set(typeBytes, 4);
+  chunk.set(data, 8);
+  writeUint32BE(chunk, 8 + data.length, crc32(concatBytes([typeBytes, data])));
+  return chunk;
+}
+
+function paethPredictor(left, up, upLeft) {
+  const estimate = left + up - upLeft;
+  const leftDistance = Math.abs(estimate - left);
+  const upDistance = Math.abs(estimate - up);
+  const upLeftDistance = Math.abs(estimate - upLeft);
+  if (leftDistance <= upDistance && leftDistance <= upLeftDistance) return left;
+  if (upDistance <= upLeftDistance) return up;
+  return upLeft;
+}
+
+function scorePngFilter(row) {
+  let score = 0;
+  for (let i = 0; i < row.length; i += 1) {
+    const signed = row[i] < 128 ? row[i] : row[i] - 256;
+    score += Math.abs(signed);
+  }
+  return score;
+}
+
+function makeFilteredPngRow(filterType, pixels, rowStart, previousStart, stride, bytesPerPixel) {
+  const row = new Uint8Array(stride);
+  for (let x = 0; x < stride; x += 1) {
+    const raw = pixels[rowStart + x];
+    const left = x >= bytesPerPixel ? pixels[rowStart + x - bytesPerPixel] : 0;
+    const up = previousStart >= 0 ? pixels[previousStart + x] : 0;
+    const upLeft = previousStart >= 0 && x >= bytesPerPixel ? pixels[previousStart + x - bytesPerPixel] : 0;
+    if (filterType === 1) {
+      row[x] = (raw - left + 256) & 0xff;
+    } else if (filterType === 2) {
+      row[x] = (raw - up + 256) & 0xff;
+    } else if (filterType === 3) {
+      row[x] = (raw - Math.floor((left + up) / 2) + 256) & 0xff;
+    } else if (filterType === 4) {
+      row[x] = (raw - paethPredictor(left, up, upLeft) + 256) & 0xff;
+    } else {
+      row[x] = raw;
+    }
+  }
+  return row;
+}
+
+function makePngScanlines(pixels, width, height, compressionLevel) {
+  const bytesPerPixel = 4;
+  const stride = width * bytesPerPixel;
+  const scanlines = new Uint8Array((stride + 1) * height);
+  const adaptiveFilters = compressionLevel >= 6;
+
+  for (let y = 0; y < height; y += 1) {
+    const rowStart = y * stride;
+    const previousStart = y > 0 ? (y - 1) * stride : -1;
+    let filterType = 0;
+    let filteredRow = makeFilteredPngRow(0, pixels, rowStart, previousStart, stride, bytesPerPixel);
+
+    if (adaptiveFilters) {
+      let bestScore = scorePngFilter(filteredRow);
+      for (let candidate = 1; candidate <= 4; candidate += 1) {
+        const candidateRow = makeFilteredPngRow(candidate, pixels, rowStart, previousStart, stride, bytesPerPixel);
+        const candidateScore = scorePngFilter(candidateRow);
+        if (candidateScore < bestScore) {
+          filterType = candidate;
+          filteredRow = candidateRow;
+          bestScore = candidateScore;
+        }
+      }
+    }
+
+    const targetOffset = y * (stride + 1);
+    scanlines[targetOffset] = filterType;
+    scanlines.set(filteredRow, targetOffset + 1);
+  }
+
+  return scanlines;
+}
+
+function canvasToCompressedPngBlob(canvas, compressionLevel) {
+  const context = canvas.getContext("2d", { alpha: true });
+  if (!context) {
+    throw new Error("PNG 変換用 Canvas の読み取りに失敗しました。");
+  }
+  const { width, height } = canvas;
+  const pixels = context.getImageData(0, 0, width, height).data;
+  const scanlines = makePngScanlines(pixels, width, height, compressionLevel);
+
+  const ihdr = new Uint8Array(13);
+  writeUint32BE(ihdr, 0, width);
+  writeUint32BE(ihdr, 4, height);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  ihdr[10] = 0;
+  ihdr[11] = 0;
+  ihdr[12] = 0;
+
+  const signature = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+  const compressed = window.pako.deflate(scanlines, { level: compressionLevel });
+  const pngBytes = concatBytes([
+    signature,
+    makePngChunk("IHDR", ihdr),
+    makePngChunk("IDAT", compressed),
+    makePngChunk("IEND"),
+  ]);
+  return new Blob([pngBytes], { type: "image/png" });
+}
+
+async function convertMetadataFile(file, format) {
+  const decoded = await decodeImageForCanvas(file);
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = decoded.image.width || decoded.image.naturalWidth;
+    canvas.height = decoded.image.height || decoded.image.naturalHeight;
+    const context = canvas.getContext("2d", { alpha: format.mimeType !== "image/jpeg" });
+    if (!context) {
+      throw new Error("Canvas の初期化に失敗しました。");
+    }
+    if (format.mimeType === "image/jpeg") {
+      context.fillStyle = "#ffffff";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+    }
+    context.drawImage(decoded.image, 0, 0, canvas.width, canvas.height);
+    const blob = await canvasToMetadataBlob(canvas, format);
+    return {
+      id: crypto.randomUUID(),
+      name: getMetadataOutputName(file, format),
+      blob,
+      originalSize: file.size,
+      url: URL.createObjectURL(blob),
+    };
+  } finally {
+    decoded.close();
+  }
+}
+
+async function runMetadataConversion() {
+  if (!metadataEls) return;
+  if (metadataState.busy) return;
+  if (metadataState.files.length === 0) {
+    setStatus(metadataEls.status, "先に画像を追加してください。", "error");
+    return;
+  }
+
+  const format = getMetadataFormat();
+  metadataState.busy = true;
+  metadataState.cancelRequested = false;
+  clearMetadataOutputs();
+  renderMetadataPreview();
+  setProgress(metadataEls.progress, 0);
+  disableButtons(true, metadataEls.run);
+  disableButtons(false, metadataEls.cancel);
+  metadataEls.zip.disabled = true;
+  appendLog(metadataEls.log, `${format.ext.toUpperCase()} 変換を開始します。`);
+
+  try {
+    for (let i = 0; i < metadataState.files.length; i += 1) {
+      if (metadataState.cancelRequested) {
+        throw makeAbortError();
+      }
+      const file = metadataState.files[i];
+      appendLog(metadataEls.log, `変換 ${i + 1}/${metadataState.files.length}: ${file.name}`);
+      const output = await convertMetadataFile(file, format);
+      metadataState.outputs.push(output);
+      renderMetadataPreview();
+      appendLog(metadataEls.log, `出力: ${output.name} / ${formatBytesWithExact(output.blob.size)}`);
+      setProgress(metadataEls.progress, (i + 1) / metadataState.files.length);
+    }
+    metadataEls.zip.disabled = metadataState.outputs.length === 0;
+    setStatus(metadataEls.status, `${metadataState.outputs.length} 枚の変換が完了しました。`, "success");
+    appendLog(metadataEls.log, "変換が完了しました。");
+  } catch (error) {
+    if (/abort/i.test(String(error?.message || ""))) {
+      setStatus(metadataEls.status, "処理をキャンセルしました。作成済みプレビューは残しています。", "default");
+      appendLog(metadataEls.log, "ユーザー操作で処理をキャンセルしました。");
+    } else {
+      setStatus(metadataEls.status, `変換に失敗しました。${error.message || error}`, "error");
+      appendLog(metadataEls.log, `エラー: ${error.message || error}`);
+    }
+  } finally {
+    metadataState.busy = false;
+    metadataState.cancelRequested = false;
+    disableButtons(false, metadataEls.run);
+    disableButtons(true, metadataEls.cancel);
+    metadataEls.zip.disabled = metadataState.outputs.length === 0;
+  }
+}
+
+async function downloadMetadataZip() {
+  if (!metadataEls) return;
+  if (metadataState.outputs.length === 0) {
+    setStatus(metadataEls.status, "先に変換してください。", "error");
+    return;
+  }
+  if (!window.JSZip) {
+    setStatus(metadataEls.status, "zip ライブラリを読み込めませんでした。ローカルサーバー経由で開いてください。", "error");
+    return;
+  }
+
+  appendLog(metadataEls.log, `${metadataState.outputs.length} 枚を zip にまとめます。`);
+  const zip = new JSZip();
+  metadataState.outputs.forEach((item) => {
+    zip.file(item.name, item.blob);
+  });
+  const zipBlob = await zip.generateAsync({
+    type: "blob",
+    streamFiles: true,
+    ...getMetadataZipOptions(),
+  });
+  downloadBlob(zipBlob, `metadata-stripped-${metadataState.outputs.length}.zip`, metadataEls.log);
+  setStatus(metadataEls.status, `zip をダウンロードしました。${formatBytes(zipBlob.size)}`, "success");
+  appendLog(metadataEls.log, `zip 出力完了: ${formatBytes(zipBlob.size)}`);
+}
+
 function getMosaicSelectedRegion() {
   return mosaicState.regions.find((region) => region.id === mosaicState.selectedId) || null;
 }
@@ -1779,6 +2181,58 @@ function initMosaicTool() {
   drawMosaicCanvas();
 }
 
+function initMetadataTool() {
+  const input = document.getElementById("metadataInput");
+  if (!input) return;
+
+  metadataEls = {
+    input,
+    drop: document.getElementById("metadataDrop"),
+    format: document.getElementById("metadataFormat"),
+    quality: document.getElementById("metadataQuality"),
+    qualityValue: document.getElementById("metadataQualityValue"),
+    qualityField: document.getElementById("metadataQualityField"),
+    compression: document.getElementById("metadataCompression"),
+    compressionField: document.getElementById("metadataCompressionField"),
+    run: document.getElementById("metadataRun"),
+    cancel: document.getElementById("metadataCancel"),
+    zip: document.getElementById("metadataZip"),
+    progress: document.getElementById("metadataProgress"),
+    status: document.getElementById("metadataStatus"),
+    log: document.getElementById("metadataLog"),
+    preview: document.getElementById("metadataPreview"),
+  };
+
+  metadataEls.format.addEventListener("change", updateMetadataControls);
+  metadataEls.quality.addEventListener("input", updateMetadataControls);
+  metadataEls.compression.addEventListener("change", updateMetadataControls);
+  metadataEls.run.addEventListener("click", () => {
+    runMetadataConversion().catch((error) => {
+      setStatus(metadataEls.status, `変換に失敗しました。${error.message || error}`, "error");
+    });
+  });
+  metadataEls.cancel.addEventListener("click", () => {
+    metadataState.cancelRequested = true;
+  });
+  metadataEls.zip.addEventListener("click", () => {
+    downloadMetadataZip().catch((error) => {
+      setStatus(metadataEls.status, `zip 作成に失敗しました。${error.message || error}`, "error");
+      appendLog(metadataEls.log, `zip エラー: ${error.message || error}`);
+    });
+  });
+  metadataEls.preview.addEventListener("click", (event) => {
+    const tile = event.target.closest(".metadata-tile");
+    if (!tile) return;
+    const item = metadataState.outputs.find((output) => output.id === tile.dataset.id);
+    if (!item) return;
+    downloadBlob(item.blob, item.name, metadataEls.log);
+  });
+
+  setupDropzone(metadataEls.drop, metadataEls.input, setMetadataFiles);
+  updateMetadataControls();
+  renderMetadataPreview();
+}
+
 function initCharacterTool() {
   const hairStyle = document.getElementById("characterHairStyle");
   if (!hairStyle) return;
@@ -1843,4 +2297,5 @@ initConcatTool();
 initUgoiraTool();
 initPixivTool();
 initMosaicTool();
+initMetadataTool();
 initCharacterTool();

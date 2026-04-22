@@ -6,3 +6,4 @@ test_data/*
 tools/video_edit/*
 test-results
 *.log
+text/

@@ -70,6 +70,12 @@
   --brand-soft: rgba(53, 111, 85, 0.12);
 }
 
+.tool-card-metadata {
+  --brand: #5f686f;
+  --brand-deep: #303942;
+  --brand-soft: rgba(95, 104, 111, 0.12);
+}
+
 @media (max-width: 820px) {
   .tool-grid {
     grid-template-columns: 1fr;

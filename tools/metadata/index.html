@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>メタデータ削除 | AI動画短期講座ツール</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="../../assets/css/base.css">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="page">
+    <div class="topbar">
+      <a class="topbar-link" href="../..">一覧へ戻る</a>
+      <nav class="topbar-nav" aria-label="ツール移動">
+        <a class="topbar-link" href="../video_edit">動画編集</a>
+        <a class="topbar-link" href="../concat">動画連結</a>
+        <a class="topbar-link" href="../ugoira">うごイラ</a>
+        <a class="topbar-link" href="../pixiv">pixivリサイズ</a>
+        <a class="topbar-link" href="../mosaic">画像モザイク</a>
+        <a class="topbar-link" href="../character">オリキャラ設定</a>
+      </nav>
+    </div>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <span class="eyebrow">METADATA STRIP</span>
+          <h1>メタデータ削除</h1>
+          <p>
+            画像を canvas で再描画し、指定フォーマットで書き出します。
+            作成済みプレビューはクリックすると個別にダウンロードできます。
+          </p>
+        </div>
+        <p class="hint">複数画像をまとめて処理できます。zip 保存にも対応しています。</p>
+      </div>
+
+      <div class="grid metadata-grid">
+        <div class="subpanel">
+          <h3>画像追加</h3>
+          <label class="dropzone" id="metadataDrop">
+            <input id="metadataInput" type="file" accept="image/*" multiple>
+            <span>
+              <strong>画像をドロップ</strong>
+              PNG / JPEG / WebP など一般的な画像を複数選択できます
+            </span>
+          </label>
+
+          <div class="form-grid metadata-form">
+            <label class="field">
+              フォーマット
+              <select id="metadataFormat">
+                <option value="image/jpeg">jpg</option>
+                <option value="image/png">png</option>
+                <option value="image/webp">webp</option>
+              </select>
+            </label>
+            <label class="field" id="metadataQualityField">
+              品質 <span id="metadataQualityValue">92</span>
+              <input id="metadataQuality" type="range" min="1" max="100" step="1" value="92">
+            </label>
+            <label class="field" id="metadataCompressionField" hidden>
+              圧縮率
+              <select id="metadataCompression">
+                <option value="png-medium">png標準</option>
+                <option value="png-low">png低</option>
+                <option value="png-high">png高</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="controls">
+            <button class="primary" id="metadataRun" type="button">変換</button>
+            <button class="danger" id="metadataCancel" type="button" disabled>処理をキャンセル</button>
+            <button class="secondary" id="metadataZip" type="button" disabled>zipダウンロード</button>
+          </div>
+          <div class="progress-shell" aria-hidden="true">
+            <div class="progress-bar" id="metadataProgress"></div>
+          </div>
+          <div class="status-row">
+            <div class="status-card" id="metadataStatus">
+              <div class="status-text">画像を追加すると、選択数と変換設定を表示します。</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="subpanel">
+          <h3>処理ログ</h3>
+          <div class="log" id="metadataLog">メタデータ削除ログ待機中</div>
+        </div>
+      </div>
+
+      <div class="subpanel metadata-preview-panel">
+        <h3>プレビュー</h3>
+        <div class="metadata-preview" id="metadataPreview">
+          <div class="empty">変換後のプレビューがここに並びます。</div>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script src="../../assets/js/app.js"></script>
+</body>
+</html>
