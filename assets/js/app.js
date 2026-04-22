@@ -54,6 +54,8 @@ const metadataState = {
   cancelRequested: false,
 };
 
+const SD_WEBUI_METADATA_VERSION_MARKER = "Version: f2.0.1v1.10.1-previous-669-gdfdcbab6";
+
 const characterDefaults = {
   hairStyle: "medium hair",
   hairExtra: "",
@@ -1160,6 +1162,23 @@ async function canvasToMetadataBlob(canvas, format) {
   return blob;
 }
 
+function scrubCanvasStealthMetadata(canvas) {
+  const context = canvas.getContext("2d", { alpha: true });
+  if (!context) {
+    throw new Error("ステルスメタデータ除去用 Canvas の読み取りに失敗しました。");
+  }
+
+  const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+  const pixels = imageData.data;
+  for (let i = 0; i < pixels.length; i += 4) {
+    pixels[i] &= 0xfe;
+    pixels[i + 1] &= 0xfe;
+    pixels[i + 2] &= 0xfe;
+    pixels[i + 3] &= 0xfe;
+  }
+  context.putImageData(imageData, 0, 0);
+}
+
 let pngCrcTable = null;
 
 function getPngCrcTable() {
@@ -1229,6 +1248,94 @@ function isCriticalPngChunk(type) {
   return (type.charCodeAt(0) & 32) === 0;
 }
 
+function decodeLatin1(bytes) {
+  let result = "";
+  for (let i = 0; i < bytes.length; i += 1) {
+    result += String.fromCharCode(bytes[i]);
+  }
+  return result;
+}
+
+function decodeUtf8(bytes) {
+  return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+}
+
+function findNullByte(bytes, start = 0) {
+  for (let i = start; i < bytes.length; i += 1) {
+    if (bytes[i] === 0) return i;
+  }
+  return -1;
+}
+
+function truncateLogText(text, maxLength = 1200) {
+  const normalized = String(text).replace(/\r\n/g, "\n");
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, maxLength)}... (${normalized.length - maxLength} 文字省略)`;
+}
+
+function parsePngTextChunk(type, data) {
+  if (type === "tEXt") {
+    const separator = findNullByte(data);
+    if (separator < 0) return null;
+    return {
+      key: decodeLatin1(data.slice(0, separator)),
+      value: decodeLatin1(data.slice(separator + 1)),
+      compressed: false,
+    };
+  }
+
+  if (type === "zTXt") {
+    const separator = findNullByte(data);
+    if (separator < 0 || separator + 1 >= data.length) return null;
+    const compressionMethod = data[separator + 1];
+    if (compressionMethod !== 0 || !window.pako) {
+      return {
+        key: decodeLatin1(data.slice(0, separator)),
+        value: `[zTXt: ${compressionMethod !== 0 ? "未対応の圧縮方式" : "pako未読み込み"}]`,
+        compressed: true,
+      };
+    }
+    return {
+      key: decodeLatin1(data.slice(0, separator)),
+      value: decodeLatin1(window.pako.inflate(data.slice(separator + 2))),
+      compressed: true,
+    };
+  }
+
+  if (type === "iTXt") {
+    const keyEnd = findNullByte(data);
+    if (keyEnd < 0 || keyEnd + 2 >= data.length) return null;
+    const compressed = data[keyEnd + 1] === 1;
+    const compressionMethod = data[keyEnd + 2];
+    const languageEnd = findNullByte(data, keyEnd + 3);
+    if (languageEnd < 0) return null;
+    const translatedKeyEnd = findNullByte(data, languageEnd + 1);
+    if (translatedKeyEnd < 0) return null;
+    const textBytes = data.slice(translatedKeyEnd + 1);
+    if (compressed) {
+      if (compressionMethod !== 0 || !window.pako) {
+        return {
+          key: decodeLatin1(data.slice(0, keyEnd)),
+          value: `[iTXt: ${compressionMethod !== 0 ? "未対応の圧縮方式" : "pako未読み込み"}]`,
+          compressed: true,
+        };
+      }
+      return {
+        key: decodeLatin1(data.slice(0, keyEnd)),
+        value: decodeUtf8(window.pako.inflate(textBytes)),
+        compressed: true,
+      };
+    }
+    return {
+      key: decodeLatin1(data.slice(0, keyEnd)),
+      value: decodeUtf8(textBytes),
+      compressed: false,
+    };
+  }
+
+  return null;
+}
+
 function parsePngChunks(bytes) {
   if (!isPngSignature(bytes)) {
     throw new Error("PNG 検査に失敗しました。PNG シグネチャが不正です。");
@@ -1288,6 +1395,84 @@ async function inspectPngMetadataBlob(blob) {
     ancillaryChunks,
     bytesAfterIend: parsed.bytesAfterIend,
   };
+}
+
+async function inspectInputPngMetadata(file) {
+  const bytes = await readBlobBytes(file);
+  if (!isPngSignature(bytes)) {
+    return null;
+  }
+
+  const parsed = parsePngChunks(bytes);
+  const textEntries = [];
+  parsed.chunks.forEach((chunk) => {
+    const data = bytes.slice(chunk.offset + 8, chunk.end - 4);
+    const text = parsePngTextChunk(chunk.type, data);
+    if (text) {
+      textEntries.push({
+        type: chunk.type,
+        key: text.key,
+        value: text.value,
+        compressed: text.compressed,
+        length: chunk.length,
+        hasTargetVersion: text.value.includes(SD_WEBUI_METADATA_VERSION_MARKER),
+      });
+    }
+  });
+
+  return {
+    chunks: parsed.chunks,
+    textEntries,
+    bytesAfterIend: parsed.bytesAfterIend,
+    hasTargetVersion: textEntries.some((entry) => entry.hasTargetVersion),
+  };
+}
+
+async function logInputMetadata(file) {
+  if (!metadataEls?.log) return;
+
+  if (file.type !== "image/png" && !file.name.toLowerCase().endsWith(".png")) {
+    appendLog(metadataEls.log, "入力メタデータ: PNG以外の詳細列挙は未対応です。出力はCanvas再描画でメタデータを落とします。");
+    return;
+  }
+
+  const pngMetadata = await inspectInputPngMetadata(file);
+  if (!pngMetadata) {
+    appendLog(metadataEls.log, "入力メタデータ: PNGとして解析できませんでした。");
+    return;
+  }
+
+  const chunkList = pngMetadata.chunks
+    .map((chunk) => `${chunk.type}:${chunk.length}B${chunk.critical ? "" : ":ancillary"}`)
+    .join(" / ");
+  appendLog(metadataEls.log, `入力PNGチャンク: ${chunkList}`);
+
+  const ancillaryChunks = pngMetadata.chunks.filter((chunk) => !chunk.critical);
+  if (ancillaryChunks.length === 0 && pngMetadata.bytesAfterIend === 0) {
+    appendLog(metadataEls.log, "入力メタデータ: 追加チャンクなし");
+  } else {
+    appendLog(
+      metadataEls.log,
+      `入力メタデータチャンク: ${ancillaryChunks.map((chunk) => chunk.type).join(",") || "なし"} / IEND後 ${pngMetadata.bytesAfterIend} B`
+    );
+  }
+
+  if (pngMetadata.textEntries.length === 0) {
+    appendLog(metadataEls.log, "入力PNGテキスト情報: なし");
+  } else {
+    pngMetadata.textEntries.forEach((entry, index) => {
+      const compressionNote = entry.compressed ? " / compressed" : "";
+      appendLog(
+        metadataEls.log,
+        `入力PNGテキスト ${index + 1}/${pngMetadata.textEntries.length}: ${entry.type}:${entry.key}${compressionNote} = ${truncateLogText(entry.value)}`
+      );
+    });
+  }
+
+  if (pngMetadata.hasTargetVersion) {
+    appendLog(metadataEls.log, `指定Version検出: ${SD_WEBUI_METADATA_VERSION_MARKER}`);
+    appendLog(metadataEls.log, "指定Versionを含むメタデータがあるため、出力からPNGメタデータを全削除します。");
+  }
 }
 
 function paethPredictor(left, up, upLeft) {
@@ -1399,7 +1584,10 @@ async function convertMetadataFile(file, format) {
     const canvas = document.createElement("canvas");
     canvas.width = decoded.image.width || decoded.image.naturalWidth;
     canvas.height = decoded.image.height || decoded.image.naturalHeight;
-    const context = canvas.getContext("2d", { alpha: format.mimeType !== "image/jpeg" });
+    const context = canvas.getContext("2d", {
+      alpha: format.mimeType !== "image/jpeg",
+      willReadFrequently: format.mimeType === "image/png",
+    });
     if (!context) {
       throw new Error("Canvas の初期化に失敗しました。");
     }
@@ -1408,6 +1596,10 @@ async function convertMetadataFile(file, format) {
       context.fillRect(0, 0, canvas.width, canvas.height);
     }
     context.drawImage(decoded.image, 0, 0, canvas.width, canvas.height);
+    if (format.mimeType === "image/png") {
+      scrubCanvasStealthMetadata(canvas);
+      appendLog(metadataEls.log, "ステルスPNGInfo対策: RGBAの最下位ビットを除去しました。");
+    }
     const blob = await canvasToMetadataBlob(canvas, format);
     return {
       id: crypto.randomUUID(),
@@ -1447,6 +1639,7 @@ async function runMetadataConversion() {
       }
       const file = metadataState.files[i];
       appendLog(metadataEls.log, `変換 ${i + 1}/${metadataState.files.length}: ${file.name}`);
+      await logInputMetadata(file);
       const output = await convertMetadataFile(file, format);
       metadataState.outputs.push(output);
       renderMetadataPreview();

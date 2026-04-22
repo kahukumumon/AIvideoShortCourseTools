@@ -7,3 +7,5 @@ tools/video_edit/*
 test-results
 *.log
 text/
+sample.png
+metadata-debug-output/
