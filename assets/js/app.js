@@ -47,6 +47,18 @@ const mosaicState = {
   drag: null,
 };
 
+const videoMosaicState = {
+  items: [],
+  selectedId: null,
+  guide: true,
+  mask: {
+    circleA: { cx: 0.38, cy: 0.48, r: 0.075 },
+    circleB: { cx: 0.62, cy: 0.48, r: 0.075 },
+  },
+  drag: null,
+  frameRequest: null,
+};
+
 const metadataState = {
   files: [],
   outputs: [],
@@ -151,6 +163,8 @@ let pixivEls = null;
 let pixivCtx = null;
 let mosaicEls = null;
 let mosaicCtx = null;
+let videoMosaicEls = null;
+let videoMosaicCtx = null;
 let metadataEls = null;
 let characterEls = null;
 
@@ -651,6 +665,8 @@ function routeLog(message) {
     appendLog(concatEls?.log, message);
   } else if (ffmpegState.activeTool === "ugoira") {
     appendLog(ugoiraEls?.log, message);
+  } else if (ffmpegState.activeTool === "videoMosaic") {
+    appendLog(videoMosaicEls?.log, message);
   }
 }
 
@@ -659,6 +675,8 @@ function routeProgress(progress) {
     setProgress(concatEls?.progress, progress);
   } else if (ffmpegState.activeTool === "ugoira") {
     setProgress(ugoiraEls?.progress, progress);
+  } else if (ffmpegState.activeTool === "videoMosaic") {
+    setProgress(videoMosaicEls?.progress, progress);
   }
 }
 
@@ -670,7 +688,10 @@ async function ensureFFmpeg(tool) {
     ffmpegState.loading = (async () => {
       routeLog("ffmpeg.wasm を初期化します。初回は 30MB 前後を読み込みます。");
       const ffmpeg = new ffmpegModules.FFmpeg();
-      ffmpeg.on("log", ({ message }) => routeLog(message));
+      ffmpeg.on("log", ({ message }) => {
+        if (String(message || "").trim() === "Aborted()") return;
+        routeLog(message);
+      });
       ffmpeg.on("progress", ({ progress }) => routeProgress(progress));
       const baseURL = "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm";
       routeLog("ffmpeg-core を CDN から取得しています。");
@@ -711,12 +732,14 @@ function cancelCurrentTask(message) {
     ffmpegState.instance.terminate();
   }
   resetFFmpegState();
-  disableButtons(true, concatEls?.cancel, ugoiraEls?.cancel);
-  disableButtons(false, concatEls?.run, ugoiraEls?.run);
+  disableButtons(true, concatEls?.cancel, ugoiraEls?.cancel, videoMosaicEls?.cancel);
+  disableButtons(false, concatEls?.run, ugoiraEls?.run, videoMosaicEls?.run);
   setStatus(concatEls?.status, "現在の処理をキャンセルしました。必要ならそのまま再実行できます。", "default");
   setStatus(ugoiraEls?.status, "現在の処理をキャンセルしました。必要ならそのまま再実行できます。", "default");
+  setStatus(videoMosaicEls?.status, "現在の処理をキャンセルしました。必要ならそのまま再実行できます。", "default");
   setProgress(concatEls?.progress, 0);
   setProgress(ugoiraEls?.progress, 0);
+  setProgress(videoMosaicEls?.progress, 0);
 }
 
 async function withFFmpegTask(tool, runner) {
@@ -737,6 +760,11 @@ async function withFFmpegTask(tool, runner) {
     disableButtons(false, ugoiraEls?.cancel);
     setProgress(ugoiraEls?.progress, 0);
   }
+  if (tool === "videoMosaic") {
+    disableButtons(true, videoMosaicEls?.run);
+    disableButtons(false, videoMosaicEls?.cancel);
+    setProgress(videoMosaicEls?.progress, 0);
+  }
 
   try {
     const ffmpeg = await ensureFFmpeg(tool);
@@ -744,7 +772,7 @@ async function withFFmpegTask(tool, runner) {
     routeProgress(1);
     return result;
   } catch (error) {
-    if (!/terminated|abort/i.test(String(error?.message || ""))) {
+    if (!/terminated|terminate|abort/i.test(String(error?.message || ""))) {
       routeLog(`エラー: ${error.message || error}`);
     }
     throw error;
@@ -757,6 +785,10 @@ async function withFFmpegTask(tool, runner) {
     if (tool === "ugoira") {
       disableButtons(false, ugoiraEls?.run);
       disableButtons(true, ugoiraEls?.cancel);
+    }
+    if (tool === "videoMosaic") {
+      disableButtons(false, videoMosaicEls?.run);
+      disableButtons(true, videoMosaicEls?.cancel);
     }
     ffmpegState.activeTool = null;
     ffmpegState.cancelCurrent = null;
@@ -2059,6 +2091,562 @@ async function exportMosaicImage() {
   setStatus(mosaicEls.status, `${outputName} を原寸 ${outputCanvas.width}×${outputCanvas.height} でダウンロードしました。`, "success");
 }
 
+function getVideoMosaicSelectedItem() {
+  return videoMosaicState.items.find((item) => item.id === videoMosaicState.selectedId) || null;
+}
+
+function getVideoMosaicPoint(event) {
+  const rect = videoMosaicEls.canvas.getBoundingClientRect();
+  return {
+    x: (event.clientX - rect.left) * (videoMosaicEls.canvas.width / rect.width),
+    y: (event.clientY - rect.top) * (videoMosaicEls.canvas.height / rect.height),
+  };
+}
+
+function cloneVideoMosaicMask(mask = videoMosaicState.mask) {
+  return {
+    circleA: { ...mask.circleA },
+    circleB: { ...mask.circleB },
+  };
+}
+
+function resetVideoMosaicMask() {
+  videoMosaicState.mask = {
+    circleA: { cx: 0.38, cy: 0.48, r: 0.075 },
+    circleB: { cx: 0.62, cy: 0.48, r: 0.075 },
+  };
+  drawVideoMosaicFrame();
+}
+
+function normalizeVideoMosaicCircle(circle) {
+  return {
+    cx: clamp(circle.cx, 0, 1),
+    cy: clamp(circle.cy, 0, 1),
+    r: clamp(circle.r, 0.01, 0.5),
+  };
+}
+
+function getVideoMosaicDisplaySize(item) {
+  if (!item?.metadata?.width || !item?.metadata?.height) {
+    return { width: 900, height: 506, scale: 1 };
+  }
+  const longest = Math.max(item.metadata.width, item.metadata.height);
+  const scale = longest > 0 ? Math.min(1, 900 / longest) : 1;
+  return {
+    width: Math.max(1, Math.round(item.metadata.width * scale)),
+    height: Math.max(1, Math.round(item.metadata.height * scale)),
+    scale,
+  };
+}
+
+function getVideoMosaicPixelCircles(width, height, mask = videoMosaicState.mask) {
+  const longest = Math.max(width, height);
+  return {
+    circleA: {
+      cx: mask.circleA.cx * width,
+      cy: mask.circleA.cy * height,
+      r: mask.circleA.r * longest,
+    },
+    circleB: {
+      cx: mask.circleB.cx * width,
+      cy: mask.circleB.cy * height,
+      r: mask.circleB.r * longest,
+    },
+  };
+}
+
+function buildVideoMosaicPath(context, width, height, mask = videoMosaicState.mask) {
+  const { circleA: a, circleB: b } = getVideoMosaicPixelCircles(width, height, mask);
+  const dx = b.cx - a.cx;
+  const dy = b.cy - a.cy;
+  const distance = Math.hypot(dx, dy);
+
+  context.beginPath();
+  if (distance < 0.001 || distance <= Math.abs(a.r - b.r) + 0.001) {
+    context.arc(a.cx, a.cy, a.r, 0, Math.PI * 2);
+    context.arc(b.cx, b.cy, b.r, 0, Math.PI * 2);
+    return;
+  }
+
+  const baseAngle = Math.atan2(dy, dx);
+  const offset = Math.acos(clamp((a.r - b.r) / distance, -1, 1));
+  const a1 = baseAngle + offset;
+  const b1 = baseAngle + offset;
+  const a2 = baseAngle - offset;
+  const b2 = baseAngle - offset;
+  const p1 = { x: a.cx + a.r * Math.cos(a1), y: a.cy + a.r * Math.sin(a1) };
+  const p2 = { x: b.cx + b.r * Math.cos(b1), y: b.cy + b.r * Math.sin(b1) };
+  const p3 = { x: b.cx + b.r * Math.cos(b2), y: b.cy + b.r * Math.sin(b2) };
+  const p4 = { x: a.cx + a.r * Math.cos(a2), y: a.cy + a.r * Math.sin(a2) };
+
+  context.moveTo(p1.x, p1.y);
+  context.lineTo(p2.x, p2.y);
+  context.arc(b.cx, b.cy, b.r, b1, b2, true);
+  context.lineTo(p4.x, p4.y);
+  context.arc(a.cx, a.cy, a.r, a2, a1, true);
+  context.closePath();
+}
+
+function isPointInVideoMosaicMask(point, width, height) {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  buildVideoMosaicPath(context, width, height);
+  return context.isPointInPath(point.x, point.y);
+}
+
+function hitVideoMosaicHandle(point) {
+  const item = getVideoMosaicSelectedItem();
+  if (!item) return null;
+  const { width, height } = getVideoMosaicDisplaySize(item);
+  const longest = Math.max(width, height);
+  const circles = getVideoMosaicPixelCircles(width, height);
+  for (const key of ["circleA", "circleB"]) {
+    const circle = circles[key];
+    const centerDistance = Math.hypot(point.x - circle.cx, point.y - circle.cy);
+    if (centerDistance <= 15) {
+      return { type: "move", key };
+    }
+    if (Math.abs(centerDistance - circle.r) <= Math.max(9, longest * 0.012)) {
+      return { type: "resize", key };
+    }
+  }
+  if (isPointInVideoMosaicMask(point, width, height)) {
+    return { type: "move-shape" };
+  }
+  return null;
+}
+
+function drawVideoMosaicPixelArea(context, sourceCanvas, width, height) {
+  const pixelSize = getMosaicPixelSize(width, height);
+  const smallWidth = Math.max(1, Math.ceil(width / pixelSize));
+  const smallHeight = Math.max(1, Math.ceil(height / pixelSize));
+  const temp = document.createElement("canvas");
+  temp.width = smallWidth;
+  temp.height = smallHeight;
+  const tempCtx = temp.getContext("2d", { alpha: false });
+  tempCtx.imageSmoothingEnabled = false;
+  tempCtx.drawImage(sourceCanvas, 0, 0, width, height, 0, 0, smallWidth, smallHeight);
+
+  context.save();
+  buildVideoMosaicPath(context, width, height);
+  context.clip();
+  context.imageSmoothingEnabled = false;
+  context.drawImage(temp, 0, 0, smallWidth, smallHeight, 0, 0, width, height);
+  context.restore();
+  context.imageSmoothingEnabled = true;
+}
+
+function drawVideoMosaicGuide(context, width, height) {
+  const circles = getVideoMosaicPixelCircles(width, height);
+  context.save();
+  context.strokeStyle = "#fff0a6";
+  context.lineWidth = 3;
+  context.shadowColor = "rgba(0, 0, 0, 0.72)";
+  context.shadowBlur = 8;
+  buildVideoMosaicPath(context, width, height);
+  context.stroke();
+
+  for (const circle of [circles.circleA, circles.circleB]) {
+    context.beginPath();
+    context.arc(circle.cx, circle.cy, circle.r, 0, Math.PI * 2);
+    context.strokeStyle = "rgba(255, 255, 255, 0.9)";
+    context.lineWidth = 2;
+    context.stroke();
+    context.beginPath();
+    context.arc(circle.cx, circle.cy, 7, 0, Math.PI * 2);
+    context.fillStyle = "#ffe45c";
+    context.strokeStyle = "#1f2631";
+    context.lineWidth = 1.5;
+    context.fill();
+    context.stroke();
+    context.beginPath();
+    context.arc(circle.cx + circle.r, circle.cy, 6, 0, Math.PI * 2);
+    context.fillStyle = "#f8faf7";
+    context.fill();
+    context.stroke();
+  }
+  context.restore();
+}
+
+function drawVideoMosaicPlaceholder() {
+  if (!videoMosaicEls?.canvas || !videoMosaicCtx) return;
+  const width = 900;
+  const height = 506;
+  videoMosaicEls.canvas.width = width;
+  videoMosaicEls.canvas.height = height;
+  videoMosaicCtx.clearRect(0, 0, width, height);
+  videoMosaicCtx.fillStyle = "#12100f";
+  videoMosaicCtx.fillRect(0, 0, width, height);
+  videoMosaicCtx.fillStyle = "#f3e4d4";
+  videoMosaicCtx.font = "18px Avenir Next, Hiragino Sans, Yu Gothic UI, sans-serif";
+  videoMosaicCtx.textAlign = "center";
+  videoMosaicCtx.fillText("動画を追加するとここにプレビューを表示します。", width / 2, height / 2);
+}
+
+function drawVideoMosaicFrame() {
+  if (!videoMosaicEls?.canvas || !videoMosaicCtx) return;
+  const item = getVideoMosaicSelectedItem();
+  if (!item) {
+    drawVideoMosaicPlaceholder();
+    return;
+  }
+  const { width, height } = getVideoMosaicDisplaySize(item);
+  const video = videoMosaicEls.video;
+  videoMosaicEls.canvas.width = width;
+  videoMosaicEls.canvas.height = height;
+  videoMosaicCtx.clearRect(0, 0, width, height);
+  videoMosaicCtx.fillStyle = "#12100f";
+  videoMosaicCtx.fillRect(0, 0, width, height);
+  if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+    videoMosaicCtx.drawImage(video, 0, 0, width, height);
+    const sourceCanvas = document.createElement("canvas");
+    sourceCanvas.width = width;
+    sourceCanvas.height = height;
+    const sourceCtx = sourceCanvas.getContext("2d", { alpha: false });
+    sourceCtx.drawImage(video, 0, 0, width, height);
+    drawVideoMosaicPixelArea(videoMosaicCtx, sourceCanvas, width, height);
+  }
+  if (videoMosaicState.guide) {
+    drawVideoMosaicGuide(videoMosaicCtx, width, height);
+  }
+  videoMosaicEls.time.value = String(video.currentTime || 0);
+  videoMosaicEls.caption.textContent = `${item.file.name} / ${item.metadata.width}×${item.metadata.height} / モザイク ${getMosaicPixelSize(item.metadata.width, item.metadata.height)}px`;
+}
+
+function scheduleVideoMosaicFrame() {
+  if (videoMosaicState.frameRequest) return;
+  videoMosaicState.frameRequest = requestAnimationFrame(() => {
+    videoMosaicState.frameRequest = null;
+    drawVideoMosaicFrame();
+    if (!videoMosaicEls?.video.paused) scheduleVideoMosaicFrame();
+  });
+}
+
+function renderVideoMosaicList() {
+  if (!videoMosaicEls?.list) return;
+  videoMosaicEls.list.innerHTML = "";
+  if (videoMosaicState.items.length === 0) {
+    videoMosaicEls.list.innerHTML = '<div class="empty">まだ動画が追加されていません。</div>';
+    setStatus(videoMosaicEls.status, "動画を追加すると固定モザイクを設定できます。", "default");
+    return;
+  }
+
+  const baseRatio = videoMosaicState.items[0].metadata.width / Math.max(1, videoMosaicState.items[0].metadata.height);
+  const hasRatioWarning = videoMosaicState.items.some((item) => {
+    const ratio = item.metadata.width / Math.max(1, item.metadata.height);
+    return Math.abs(ratio - baseRatio) > 0.05;
+  });
+  setStatus(
+    videoMosaicEls.status,
+    `${videoMosaicState.items.length} 本追加済み。ピクセルサイズは各動画の長辺 1/100 で自動算出します。${hasRatioWarning ? " 縦横比が異なる動画が含まれます。" : ""}`,
+    hasRatioWarning ? "error" : "default"
+  );
+
+  videoMosaicState.items.forEach((item, index) => {
+    const row = document.createElement("div");
+    row.className = `list-item${item.id === videoMosaicState.selectedId ? " selected" : ""}`;
+    row.innerHTML = `
+      <div>
+        <div class="list-title">${index + 1}. ${item.file.name}</div>
+        <div class="list-sub">${item.metadata.width}×${item.metadata.height} / ${formatSeconds(item.metadata.duration)} / ${formatBytes(item.file.size)} / mosaic ${getMosaicPixelSize(item.metadata.width, item.metadata.height)}px</div>
+      </div>
+      <div class="item-actions">
+        <button class="secondary" type="button" data-action="select" data-id="${item.id}">表示</button>
+        <button class="ghost" type="button" data-action="remove" data-id="${item.id}">削除</button>
+      </div>
+    `;
+    videoMosaicEls.list.append(row);
+  });
+}
+
+async function addVideoMosaicFiles(files) {
+  const videoFiles = files.filter((file) => file instanceof File && file.type.startsWith("video/"));
+  if (videoFiles.length === 0) {
+    setStatus(videoMosaicEls.status, "動画ファイルを追加してください。", "error");
+    return;
+  }
+  for (const file of videoFiles) {
+    const metadata = await getVideoMetadata(file);
+    videoMosaicState.items.push({
+      id: crypto.randomUUID(),
+      file,
+      metadata,
+      objectUrl: URL.createObjectURL(file),
+    });
+    appendLog(videoMosaicEls.log, `追加: ${file.name} / ${metadata.width}×${metadata.height} / ${formatSeconds(metadata.duration)}`);
+  }
+  if (!videoMosaicState.selectedId) {
+    selectVideoMosaicItem(videoMosaicState.items[0].id);
+  }
+  renderVideoMosaicList();
+}
+
+function selectVideoMosaicItem(id) {
+  const item = videoMosaicState.items.find((candidate) => candidate.id === id);
+  if (!item) return;
+  videoMosaicState.selectedId = item.id;
+  videoMosaicEls.video.pause();
+  videoMosaicEls.play.textContent = "再生";
+  videoMosaicEls.video.src = item.objectUrl;
+  videoMosaicEls.video.load();
+  videoMosaicEls.time.max = String(Math.max(0.01, item.metadata.duration));
+  videoMosaicEls.time.value = "0";
+  renderVideoMosaicList();
+}
+
+function removeVideoMosaicItem(id) {
+  const index = videoMosaicState.items.findIndex((item) => item.id === id);
+  if (index < 0) return;
+  const [removed] = videoMosaicState.items.splice(index, 1);
+  URL.revokeObjectURL(removed.objectUrl);
+  appendLog(videoMosaicEls.log, `削除: ${removed.file.name}`);
+  if (videoMosaicState.selectedId === id) {
+    videoMosaicState.selectedId = videoMosaicState.items[0]?.id || null;
+    if (videoMosaicState.selectedId) {
+      selectVideoMosaicItem(videoMosaicState.selectedId);
+    } else {
+      videoMosaicEls.video.removeAttribute("src");
+      videoMosaicEls.video.load();
+      drawVideoMosaicPlaceholder();
+    }
+  }
+  renderVideoMosaicList();
+}
+
+function updateVideoMosaicDrag(point) {
+  const drag = videoMosaicState.drag;
+  const item = getVideoMosaicSelectedItem();
+  if (!drag || !item) return;
+  const { width, height } = getVideoMosaicDisplaySize(item);
+  const longest = Math.max(width, height);
+  const dx = (point.x - drag.startPoint.x) / width;
+  const dy = (point.y - drag.startPoint.y) / height;
+
+  if (drag.type === "move-shape") {
+    videoMosaicState.mask.circleA = normalizeVideoMosaicCircle({
+      ...drag.origin.circleA,
+      cx: drag.origin.circleA.cx + dx,
+      cy: drag.origin.circleA.cy + dy,
+    });
+    videoMosaicState.mask.circleB = normalizeVideoMosaicCircle({
+      ...drag.origin.circleB,
+      cx: drag.origin.circleB.cx + dx,
+      cy: drag.origin.circleB.cy + dy,
+    });
+  } else if (drag.type === "move") {
+    videoMosaicState.mask[drag.key] = normalizeVideoMosaicCircle({
+      ...drag.origin[drag.key],
+      cx: drag.origin[drag.key].cx + dx,
+      cy: drag.origin[drag.key].cy + dy,
+    });
+  } else if (drag.type === "resize") {
+    const circle = drag.origin[drag.key];
+    const center = { x: circle.cx * width, y: circle.cy * height };
+    const radius = Math.hypot(point.x - center.x, point.y - center.y) / longest;
+    videoMosaicState.mask[drag.key] = normalizeVideoMosaicCircle({ ...circle, r: radius });
+  }
+  drawVideoMosaicFrame();
+}
+
+async function canvasToPngBytes(canvas) {
+  const blob = await new Promise((resolve, reject) => {
+    canvas.toBlob((result) => {
+      if (result) resolve(result);
+      else reject(new Error("PNG 変換に失敗しました。"));
+    }, "image/png");
+  });
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
+async function createVideoMosaicMaskBytes(width, height) {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d", { alpha: false });
+  context.fillStyle = "#000";
+  context.fillRect(0, 0, width, height);
+  context.fillStyle = "#fff";
+  buildVideoMosaicPath(context, width, height);
+  context.fill();
+  return canvasToPngBytes(canvas);
+}
+
+function getVideoMosaicOutputName(file) {
+  const { base } = splitName(file.name);
+  return `${base}_mosaic.mp4`;
+}
+
+async function exportVideoMosaicAll() {
+  if (videoMosaicState.items.length === 0) {
+    setStatus(videoMosaicEls.status, "先に動画を追加してください。", "error");
+    return;
+  }
+  appendLog(videoMosaicEls.log, "動画固定モザイクの書き出しを開始します。");
+  setStatus(videoMosaicEls.status, "全動画へ固定モザイクを適用しています。", "default");
+
+  await withFFmpegTask("videoMosaic", async (ffmpeg) => {
+    const createdFiles = [];
+    try {
+      for (let i = 0; i < videoMosaicState.items.length; i += 1) {
+        const item = videoMosaicState.items[i];
+        const ext = splitName(item.file.name).ext || ".mp4";
+        const inputName = `video_mosaic_input_${i}${ext}`;
+        const maskName = `video_mosaic_mask_${i}.png`;
+        const outputName = getVideoMosaicOutputName(item.file);
+        const width = item.metadata.width;
+        const height = item.metadata.height;
+        const pixelSize = getMosaicPixelSize(width, height);
+        const smallWidth = Math.max(1, Math.ceil(width / pixelSize));
+        const smallHeight = Math.max(1, Math.ceil(height / pixelSize));
+
+        appendLog(videoMosaicEls.log, `入力準備: ${item.file.name}`);
+        await ffmpeg.writeFile(inputName, await ffmpegModules.fetchFile(item.file));
+        await ffmpeg.writeFile(maskName, await createVideoMosaicMaskBytes(width, height));
+        createdFiles.push(inputName, maskName, outputName);
+
+        appendLog(videoMosaicEls.log, `モザイク適用: ${width}×${height} / pixel ${pixelSize}px / ${outputName}`);
+        const filter = [
+          `[0:v]split[base][pix]`,
+          `[pix]scale=${smallWidth}:${smallHeight}:flags=neighbor,scale=${width}:${height}:flags=neighbor[mosaic]`,
+          `[mosaic][1:v]alphamerge[masked]`,
+          `[base][masked]overlay=format=auto,format=yuv420p[outv]`,
+        ].join(";");
+        const exitCode = await ffmpeg.exec([
+          "-i", inputName,
+          "-loop", "1",
+          "-i", maskName,
+          "-filter_complex", filter,
+          "-map", "[outv]",
+          "-map", "0:a?",
+          "-c:v", "libx264",
+          "-preset", "veryfast",
+          "-c:a", "copy",
+          "-shortest",
+          "-t", Math.max(0.01, item.metadata.duration).toFixed(6),
+          outputName,
+        ]);
+        if (exitCode !== 0) {
+          throw new Error(`ffmpeg が終了コード ${exitCode} を返しました。`);
+        }
+        const data = await ffmpeg.readFile(outputName);
+        const outputBlob = new Blob([data], { type: "video/mp4" });
+        downloadBlob(outputBlob, outputName, videoMosaicEls.log);
+        appendLog(videoMosaicEls.log, `出力完了: ${outputName} / ${formatBytes(outputBlob.size)}`);
+        setProgress(videoMosaicEls.progress, (i + 1) / videoMosaicState.items.length);
+      }
+      setStatus(videoMosaicEls.status, `${videoMosaicState.items.length} 本の書き出しが完了しました。`, "success");
+    } finally {
+      await removeFiles(ffmpeg, createdFiles);
+    }
+  });
+}
+
+function initVideoMosaicTool() {
+  const input = document.getElementById("videoMosaicInput");
+  if (!input) return;
+
+  videoMosaicEls = {
+    input,
+    drop: document.getElementById("videoMosaicDrop"),
+    list: document.getElementById("videoMosaicList"),
+    canvas: document.getElementById("videoMosaicCanvas"),
+    video: document.getElementById("videoMosaicSource"),
+    play: document.getElementById("videoMosaicPlay"),
+    time: document.getElementById("videoMosaicTime"),
+    guide: document.getElementById("videoMosaicGuide"),
+    reset: document.getElementById("videoMosaicReset"),
+    run: document.getElementById("videoMosaicRun"),
+    cancel: document.getElementById("videoMosaicCancel"),
+    progress: document.getElementById("videoMosaicProgress"),
+    status: document.getElementById("videoMosaicStatus"),
+    caption: document.getElementById("videoMosaicCaption"),
+    log: document.getElementById("videoMosaicLog"),
+  };
+  videoMosaicCtx = videoMosaicEls.canvas.getContext("2d", { alpha: false });
+
+  setupDropzone(videoMosaicEls.drop, videoMosaicEls.input, (files) => {
+    addVideoMosaicFiles(files).catch((error) => {
+      setStatus(videoMosaicEls.status, error.message || String(error), "error");
+      appendLog(videoMosaicEls.log, `追加エラー: ${error.message || error}`);
+    });
+  });
+
+  videoMosaicEls.list.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-action]");
+    if (!button) return;
+    if (button.dataset.action === "select") selectVideoMosaicItem(button.dataset.id);
+    if (button.dataset.action === "remove") removeVideoMosaicItem(button.dataset.id);
+  });
+
+  videoMosaicEls.canvas.addEventListener("pointerdown", (event) => {
+    if (!getVideoMosaicSelectedItem()) return;
+    const point = getVideoMosaicPoint(event);
+    const hit = hitVideoMosaicHandle(point);
+    if (!hit) return;
+    videoMosaicState.drag = {
+      ...hit,
+      startPoint: point,
+      origin: cloneVideoMosaicMask(),
+    };
+    videoMosaicEls.canvas.setPointerCapture(event.pointerId);
+  });
+
+  videoMosaicEls.canvas.addEventListener("pointermove", (event) => {
+    if (!videoMosaicState.drag) return;
+    updateVideoMosaicDrag(getVideoMosaicPoint(event));
+  });
+
+  ["pointerup", "pointercancel", "pointerleave"].forEach((eventName) => {
+    videoMosaicEls.canvas.addEventListener(eventName, () => {
+      videoMosaicState.drag = null;
+    });
+  });
+
+  videoMosaicEls.video.addEventListener("loadeddata", drawVideoMosaicFrame);
+  videoMosaicEls.video.addEventListener("seeked", drawVideoMosaicFrame);
+  videoMosaicEls.video.addEventListener("timeupdate", () => {
+    videoMosaicEls.time.value = String(videoMosaicEls.video.currentTime || 0);
+  });
+  videoMosaicEls.video.addEventListener("play", scheduleVideoMosaicFrame);
+  videoMosaicEls.video.addEventListener("pause", drawVideoMosaicFrame);
+
+  videoMosaicEls.play.addEventListener("click", async () => {
+    if (!getVideoMosaicSelectedItem()) return;
+    if (videoMosaicEls.video.paused) {
+      await videoMosaicEls.video.play();
+      videoMosaicEls.play.textContent = "停止";
+      scheduleVideoMosaicFrame();
+    } else {
+      videoMosaicEls.video.pause();
+      videoMosaicEls.play.textContent = "再生";
+    }
+  });
+
+  videoMosaicEls.time.addEventListener("input", () => {
+    videoMosaicEls.video.currentTime = Number(videoMosaicEls.time.value) || 0;
+  });
+
+  videoMosaicEls.guide.addEventListener("change", () => {
+    videoMosaicState.guide = videoMosaicEls.guide.checked;
+    drawVideoMosaicFrame();
+  });
+
+  videoMosaicEls.reset.addEventListener("click", resetVideoMosaicMask);
+  videoMosaicEls.cancel.addEventListener("click", () => {
+    cancelCurrentTask("ユーザー操作で動画固定モザイクをキャンセルしました。");
+  });
+  videoMosaicEls.run.addEventListener("click", () => {
+    exportVideoMosaicAll().catch((error) => {
+      if (/terminated|terminate|abort/i.test(String(error?.message || ""))) return;
+      setStatus(videoMosaicEls.status, `書き出しに失敗しました。${error.message || error}`, "error");
+    });
+  });
+
+  drawVideoMosaicPlaceholder();
+}
+
 function initConcatTool() {
   const input = document.getElementById("concatInput");
   if (!input) return;
@@ -2632,5 +3220,6 @@ initConcatTool();
 initUgoiraTool();
 initPixivTool();
 initMosaicTool();
+initVideoMosaicTool();
 initMetadataTool();
 initCharacterTool();

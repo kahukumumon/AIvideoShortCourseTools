@@ -88,3 +88,8 @@
   --brand-soft: rgba(143, 62, 34, 0.12);
 }
 
+.tool-card-video-mosaic {
+  --brand: #3e6f8c;
+  --brand-deep: #244d64;
+  --brand-soft: rgba(62, 111, 140, 0.12);
+}
