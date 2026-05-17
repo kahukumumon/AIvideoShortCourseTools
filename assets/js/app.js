@@ -57,6 +57,7 @@ const videoMosaicState = {
   },
   drag: null,
   frameRequest: null,
+  previewToken: 0,
 };
 
 const metadataState = {
@@ -2324,6 +2325,24 @@ function scheduleVideoMosaicFrame() {
   });
 }
 
+async function showVideoMosaicInitialFrame(itemId, token) {
+  const item = videoMosaicState.items.find((candidate) => candidate.id === itemId);
+  if (!item || token !== videoMosaicState.previewToken) return;
+  try {
+    await waitForVideoReady(videoMosaicEls.video);
+    if (token !== videoMosaicState.previewToken || videoMosaicState.selectedId !== itemId) return;
+    await seekVideo(videoMosaicEls.video, 0);
+    if (token !== videoMosaicState.previewToken || videoMosaicState.selectedId !== itemId) return;
+    await waitForPresentedVideoFrame(videoMosaicEls.video, 0);
+    if (token !== videoMosaicState.previewToken || videoMosaicState.selectedId !== itemId) return;
+    drawVideoMosaicFrame();
+  } catch (error) {
+    if (!/abort/i.test(String(error?.message || ""))) {
+      appendLog(videoMosaicEls.log, `0フレーム目の表示に失敗しました: ${error.message || error}`);
+    }
+  }
+}
+
 function renderVideoMosaicList() {
   if (!videoMosaicEls?.list) return;
   videoMosaicEls.list.innerHTML = "";
@@ -2361,12 +2380,34 @@ function renderVideoMosaicList() {
   });
 }
 
+function clearVideoMosaicItems() {
+  videoMosaicState.items.forEach((item) => URL.revokeObjectURL(item.objectUrl));
+  videoMosaicState.items = [];
+  videoMosaicState.selectedId = null;
+  videoMosaicState.previewToken += 1;
+  if (videoMosaicEls?.video) {
+    videoMosaicEls.video.pause();
+    videoMosaicEls.video.removeAttribute("src");
+    videoMosaicEls.video.load();
+  }
+  if (videoMosaicEls?.play) videoMosaicEls.play.textContent = "再生";
+  if (videoMosaicEls?.time) {
+    videoMosaicEls.time.max = "0.01";
+    videoMosaicEls.time.value = "0";
+  }
+  drawVideoMosaicPlaceholder();
+}
+
 async function addVideoMosaicFiles(files) {
   const videoFiles = files.filter((file) => file instanceof File && file.type.startsWith("video/"));
   if (videoFiles.length === 0) {
     setStatus(videoMosaicEls.status, "動画ファイルを追加してください。", "error");
     return;
   }
+  if (videoMosaicState.items.length > 0) {
+    appendLog(videoMosaicEls.log, "既存の動画をクリアして入れ替えます。");
+  }
+  clearVideoMosaicItems();
   for (const file of videoFiles) {
     const metadata = await getVideoMetadata(file);
     videoMosaicState.items.push({
@@ -2377,7 +2418,7 @@ async function addVideoMosaicFiles(files) {
     });
     appendLog(videoMosaicEls.log, `追加: ${file.name} / ${metadata.width}×${metadata.height} / ${formatSeconds(metadata.duration)}`);
   }
-  if (!videoMosaicState.selectedId) {
+  if (videoMosaicState.items.length > 0) {
     selectVideoMosaicItem(videoMosaicState.items[0].id);
   }
   renderVideoMosaicList();
@@ -2393,6 +2434,8 @@ function selectVideoMosaicItem(id) {
   videoMosaicEls.video.load();
   videoMosaicEls.time.max = String(Math.max(0.01, item.metadata.duration));
   videoMosaicEls.time.value = "0";
+  videoMosaicState.previewToken += 1;
+  showVideoMosaicInitialFrame(item.id, videoMosaicState.previewToken);
   renderVideoMosaicList();
 }
 
@@ -2407,6 +2450,7 @@ function removeVideoMosaicItem(id) {
     if (videoMosaicState.selectedId) {
       selectVideoMosaicItem(videoMosaicState.selectedId);
     } else {
+      videoMosaicState.previewToken += 1;
       videoMosaicEls.video.removeAttribute("src");
       videoMosaicEls.video.load();
       drawVideoMosaicPlaceholder();
