@@ -307,6 +307,56 @@ async function seekVideo(video, time, signal) {
   throwIfAborted(signal);
 }
 
+async function waitForPresentedVideoFrame(video, targetTime, signal) {
+  throwIfAborted(signal);
+  if (typeof video.requestVideoFrameCallback !== "function") {
+    await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+    throwIfAborted(signal);
+    return;
+  }
+
+  await new Promise((resolve, reject) => {
+    let callbackId = 0;
+    const cleanup = () => {
+      video.removeEventListener("error", onError);
+      signal?.removeEventListener("abort", onAbort);
+      if (callbackId && typeof video.cancelVideoFrameCallback === "function") {
+        video.cancelVideoFrameCallback(callbackId);
+      }
+    };
+    const onError = () => {
+      cleanup();
+      reject(new Error("動画フレームの描画待機に失敗しました。"));
+    };
+    const onAbort = () => {
+      cleanup();
+      reject(makeAbortError());
+    };
+    const onFrame = (_now, metadata) => {
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      const presentedTime = Number(metadata?.mediaTime);
+      if (!Number.isFinite(presentedTime) || presentedTime + 0.0005 >= targetTime) {
+        cleanup();
+        resolve();
+        return;
+      }
+      callbackId = video.requestVideoFrameCallback(onFrame);
+    };
+    video.addEventListener("error", onError, { once: true });
+    signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      callbackId = video.requestVideoFrameCallback(onFrame);
+    } catch (error) {
+      cleanup();
+      reject(error);
+    }
+  });
+  throwIfAborted(signal);
+}
+
 async function canvasToJpegBytes(canvas, quality = 0.92) {
   const blob = await new Promise((resolve, reject) => {
     canvas.toBlob((result) => {
@@ -2185,7 +2235,7 @@ function initUgoiraTool() {
             `ブラウザ負荷を抑えるため ${ugoiraState.metadata.width}×${ugoiraState.metadata.height} → ${safeSize.width}×${safeSize.height} に縮小します。`
           );
         }
-        appendLog(ugoiraEls.log, `うごイラ変換: ${safeSize.width}×${safeSize.height} / 想定 ${expectedFrames} 枚`);
+        appendLog(ugoiraEls.log, `うごイラ変換: ${safeSize.width}×${safeSize.height} / ${start.toFixed(3)} 秒 → ${Math.min(end, ugoiraState.metadata.duration).toFixed(3)} 秒 / 想定 ${expectedFrames} 枚`);
 
         const extractor = document.createElement("video");
         extractor.preload = "auto";
@@ -2218,11 +2268,12 @@ function initUgoiraTool() {
           throwIfAborted(signal);
           const time = Math.min(frameTimes[i], Math.max(0, ugoiraState.metadata.duration - 0.001));
           await seekVideo(extractor, time, signal);
+          await waitForPresentedVideoFrame(extractor, time, signal);
           context.drawImage(extractor, 0, 0, safeSize.width, safeSize.height);
           const jpgBytes = await canvasToJpegBytes(canvas, 0.92);
           const frameName = `frame_${String(i + 1).padStart(5, "0")}.jpg`;
           zip.file(frameName, jpgBytes, { binary: true });
-          appendLog(ugoiraEls.log, `フレーム ${i + 1}/${frameTimes.length}: ${frameName}`);
+          appendLog(ugoiraEls.log, `フレーム ${i + 1}/${frameTimes.length}: ${frameName} @ ${time.toFixed(3)} 秒`);
           setProgress(ugoiraEls.progress, (i + 1) / frameTimes.length);
         }
 
