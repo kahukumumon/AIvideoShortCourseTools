@@ -3,3 +3,38 @@
   --brand-deep: #8c3b19;
   --brand-soft: rgba(191, 85, 39, 0.1);
 }
+
+.concat-trim-field {
+  display: grid;
+  grid-template-columns: auto minmax(160px, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid rgba(67, 50, 32, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 250, 243, 0.86);
+  color: var(--muted);
+}
+
+.concat-trim-field input {
+  width: 100%;
+  accent-color: var(--brand);
+}
+
+.concat-trim-field output {
+  min-width: 90px;
+  color: var(--ink);
+  font-family: var(--mono);
+  text-align: right;
+}
+
+@media (max-width: 640px) {
+  .concat-trim-field {
+    grid-template-columns: 1fr;
+  }
+
+  .concat-trim-field output {
+    text-align: left;
+  }
+}

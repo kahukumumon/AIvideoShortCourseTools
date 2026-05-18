@@ -29,8 +29,8 @@
           <span class="eyebrow">VIDEO CONCAT</span>
           <h1>動画連結</h1>
           <p>
-            動画を複数追加して順番を入れ替え、無劣化優先の <code>-c copy</code> で連結します。
-            同一 codec / 解像度 / fps / 音声構成の素材を使ってください。
+            動画を複数追加して順番を入れ替え、0 フレーム時は無劣化優先の <code>-c copy</code> で連結します。
+            つなぎ目トリムを使う場合は再エンコードして、各接合部の前後を指定フレーム数だけ切り落とします。
           </p>
         </div>
         <p class="hint">プレビューは表示しません。処理ログは右側にそのまま残します。</p>
@@ -49,6 +49,11 @@
               <strong>動画をドラッグ＆ドロップ</strong>
               クリック選択にも対応 / 同名ファイルは自動で連番表示
             </span>
+          </label>
+          <label class="range-field concat-trim-field">
+            <span>つなぎ目トリム</span>
+            <input id="concatTrimFrames" type="range" min="0" max="5" step="1" value="0">
+            <output id="concatTrimFramesValue" for="concatTrimFrames">0 フレーム</output>
           </label>
           <div class="controls">
             <button class="secondary" id="concatClear">リストを空にする</button>

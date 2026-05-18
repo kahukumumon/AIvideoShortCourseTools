@@ -20,11 +20,14 @@ const ffmpegState = {
   busy: false,
   activeTool: null,
   cancelCurrent: null,
+  logCapture: null,
+  suppressLogRouting: false,
 };
 
 const concatState = {
   items: [],
   nameCounts: new Map(),
+  trimFrames: 0,
 };
 
 const ugoiraState = {
@@ -419,6 +422,7 @@ async function prepareConcatInputs(ffmpeg) {
   const mountPoint = `concat_inputs_${crypto.randomUUID()}`;
   const mountedFiles = [];
   const listLines = [];
+  const inputPaths = [];
 
   for (let i = 0; i < concatState.items.length; i += 1) {
     const item = concatState.items[i];
@@ -428,7 +432,9 @@ async function prepareConcatInputs(ffmpeg) {
       type: item.file.type || "application/octet-stream",
       lastModified: item.file.lastModified || Date.now(),
     }));
-    listLines.push(`file '${mountPoint}/${inputName}'`);
+    const inputPath = `${mountPoint}/${inputName}`;
+    inputPaths.push(inputPath);
+    listLines.push(`file '${inputPath}'`);
     appendLog(concatEls?.log, `入力追加: ${item.label}`);
   }
 
@@ -438,6 +444,7 @@ async function prepareConcatInputs(ffmpeg) {
 
   return {
     listLines,
+    inputPaths,
     async cleanup() {
       try {
         await ffmpeg.unmount(mountPoint);
@@ -446,6 +453,289 @@ async function prepareConcatInputs(ffmpeg) {
       await deleteDirIfExists(ffmpeg, mountPoint);
     },
   };
+}
+
+function parseFpsValue(value) {
+  if (!value || value === "0/0") return 30;
+  const [num, den] = String(value).split("/").map((part) => Number(part));
+  if (Number.isFinite(num) && Number.isFinite(den) && den > 0 && num > 0) {
+    return num / den;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 30;
+}
+
+async function captureFfmpegLogs(operation) {
+  const previousCapture = ffmpegState.logCapture;
+  const previousSuppress = ffmpegState.suppressLogRouting;
+  const capture = [];
+  try {
+    ffmpegState.logCapture = capture;
+    ffmpegState.suppressLogRouting = true;
+    await operation();
+  } finally {
+    ffmpegState.logCapture = previousCapture;
+    ffmpegState.suppressLogRouting = previousSuppress;
+  }
+  return capture.join("\n");
+}
+
+async function runFfmpegSilently(operation) {
+  const previousCapture = ffmpegState.logCapture;
+  const previousSuppress = ffmpegState.suppressLogRouting;
+  try {
+    ffmpegState.logCapture = [];
+    ffmpegState.suppressLogRouting = true;
+    return await operation();
+  } finally {
+    ffmpegState.logCapture = previousCapture;
+    ffmpegState.suppressLogRouting = previousSuppress;
+  }
+}
+
+async function detectConcatAudioStream(ffmpeg, inputPath) {
+  try {
+    const exitCode = await runFfmpegSilently(() => ffmpeg.exec([
+      "-v", "error",
+      "-i", inputPath,
+      "-map", "0:a:0",
+      "-c", "copy",
+      "-f", "null",
+      "-",
+    ]));
+    return exitCode === 0;
+  } catch (_) {
+    return false;
+  }
+}
+
+function parseTimestampDuration(text) {
+  const match = String(text).match(/Duration:\s*(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)/);
+  if (!match) return 0;
+  const hours = Number(match[1]) || 0;
+  const minutes = Number(match[2]) || 0;
+  const seconds = Number(match[3]) || 0;
+  return hours * 3600 + minutes * 60 + seconds;
+}
+
+function parseInputMetadataFromLogs(text) {
+  const lines = String(text).split(/\r?\n/);
+  const videoLine = lines.find((line) => /Stream #\S+.*Video:/i.test(line)) || "";
+  const hasAudio = lines.some((line) => /Stream #\S+.*Audio:/i.test(line));
+  const fpsMatch = videoLine.match(/(\d+(?:\.\d+)?)\s*fps/i)
+    || videoLine.match(/(\d+(?:\.\d+)?)\s*tbr/i);
+  const fps = fpsMatch ? Number(fpsMatch[1]) : 30;
+  const duration = parseTimestampDuration(text);
+  return {
+    fps: Number.isFinite(fps) && fps > 0 ? fps : 30,
+    duration,
+    hasAudio,
+    hasVideo: Boolean(videoLine),
+  };
+}
+
+async function probeConcatFile(file) {
+  await ensureWebCodecsModules();
+  const mp4box = webCodecsModules.mp4box;
+  const buffer = await file.arrayBuffer();
+  const mp4file = mp4box.createFile();
+
+  return await new Promise((resolve, reject) => {
+    let done = false;
+    const settle = (fn) => {
+      if (done) return;
+      done = true;
+      fn();
+    };
+
+    mp4file.onError = (error) => settle(() => reject(error instanceof Error ? error : new Error(String(error))));
+    mp4file.onReady = (info) => {
+      const videoTrack = info.videoTracks?.[0] ?? info.tracks?.find((track) => Boolean(track?.video)) ?? null;
+      if (!videoTrack) {
+        settle(() => reject(new Error("MP4 内に動画トラックが見つかりません。")));
+        return;
+      }
+      const duration = Math.max(0, (videoTrack.duration || 0) / Math.max(1, videoTrack.timescale || 1));
+      const sampleCount = Number(videoTrack.nb_samples) || 0;
+      const fps = duration > 0 && sampleCount > 0 ? sampleCount / duration : 30;
+      settle(() => resolve({
+        fps: Number.isFinite(fps) && fps > 0 ? fps : 30,
+        duration,
+        hasAudio: Boolean(info.audioTracks?.length || info.tracks?.some((track) => Boolean(track?.audio))),
+      }));
+    };
+
+    const tagged = buffer;
+    tagged.fileStart = 0;
+    mp4file.appendBuffer(tagged);
+    mp4file.flush();
+  });
+}
+
+async function probeConcatInput(ffmpeg, inputPath, file, index, createdFiles) {
+  void createdFiles;
+  if (file) {
+    try {
+      return await probeConcatFile(file);
+    } catch (metadataError) {
+      appendLog(concatEls?.log, `MP4 メタデータ解析失敗 ${index}: ${metadataError.message || metadataError}。ffmpeg で音声有無だけ確認します。`);
+      const hasAudio = await detectConcatAudioStream(ffmpeg, inputPath);
+      return { fps: 30, duration: 0, hasAudio };
+    }
+  }
+
+  try {
+    const output = await captureFfmpegLogs(async () => {
+      const exitCode = await ffmpeg.ffprobe([
+        "-v", "error",
+        "-show_entries", "stream=codec_type,avg_frame_rate,r_frame_rate,duration",
+        "-of", "json",
+        inputPath,
+      ]);
+      if (exitCode !== 0) throw new Error(`ffprobe exit ${exitCode}`);
+    });
+    const jsonStart = output.indexOf("{");
+    const jsonEnd = output.lastIndexOf("}");
+    if (jsonStart < 0 || jsonEnd < jsonStart) {
+      throw new Error("ffprobe JSON が見つかりませんでした");
+    }
+    const text = output.slice(jsonStart, jsonEnd + 1);
+    const parsed = JSON.parse(text);
+    const streams = Array.isArray(parsed.streams) ? parsed.streams : [];
+    const video = streams.find((stream) => stream.codec_type === "video") || {};
+    const audio = streams.some((stream) => stream.codec_type === "audio");
+    const fps = parseFpsValue(video.avg_frame_rate || video.r_frame_rate);
+    const duration = Number(video.duration) || 0;
+    return {
+      fps,
+      duration,
+      hasAudio: audio,
+    };
+  } catch (error) {
+    appendLog(concatEls?.log, `ffprobe 取得失敗: ${inputPath} / ${error.message || error}。ffmpeg 入力解析へ切り替えます。`);
+    try {
+      const inputLog = await captureFfmpegLogs(async () => {
+        try {
+          await ffmpeg.exec(["-hide_banner", "-i", inputPath]);
+        } catch (_) {
+        }
+      });
+      const parsed = parseInputMetadataFromLogs(inputLog);
+      if (parsed.hasVideo) {
+        return {
+          fps: parsed.fps,
+          duration: parsed.duration,
+          hasAudio: parsed.hasAudio,
+        };
+      }
+      const hasAudio = await detectConcatAudioStream(ffmpeg, inputPath);
+      appendLog(concatEls?.log, `ffmpeg 入力解析で動画ストリームを確認できませんでした。30fps / 音声 ${hasAudio ? "あり" : "なし"}で続行します。`);
+      return { fps: 30, duration: 0, hasAudio };
+    } catch (fallbackError) {
+      appendLog(concatEls?.log, `ffmpeg 入力解析失敗: ${fallbackError.message || fallbackError}。30fps / 音声なしで続行します。`);
+    }
+    return { fps: 30, duration: 0, hasAudio: false };
+  }
+}
+
+async function probeConcatInputs(ffmpeg, inputPaths, files, createdFiles) {
+  const results = [];
+  for (let i = 0; i < inputPaths.length; i += 1) {
+    const metadata = await probeConcatInput(ffmpeg, inputPaths[i], files?.[i] ?? null, i + 1, createdFiles);
+    results.push(metadata);
+    appendLog(
+      concatEls?.log,
+      `入力解析 ${i + 1}/${inputPaths.length}: ${metadata.fps.toFixed(3)}fps / ${formatSeconds(metadata.duration)} / 音声 ${metadata.hasAudio ? "あり" : "なし"}`
+    );
+  }
+  return results;
+}
+
+function getConcatTrimFrames() {
+  return Math.max(0, Math.min(5, Math.round(Number(concatState.trimFrames) || 0)));
+}
+
+function getConcatTrimFramesFromInput() {
+  return Math.max(0, Math.min(5, Math.round(Number(concatEls?.trimFrames?.value) || 0)));
+}
+
+function updateConcatTrimDisplay() {
+  if (!concatEls?.trimFrames || !concatEls?.trimFramesValue) return;
+  const frames = getConcatTrimFrames();
+  concatEls.trimFrames.value = String(frames);
+  concatEls.trimFramesValue.value = `${frames} フレーム`;
+  concatEls.trimFramesValue.textContent = `${frames} フレーム`;
+}
+
+function buildTrimmedConcatCommand(inputPaths, metadataList, trimFrames, outputName) {
+  const args = inputPaths.flatMap((inputPath) => ["-i", inputPath]);
+  const filters = [];
+  const videoLabels = [];
+  const streamLabels = [];
+  const includeAudio = metadataList.some((metadata) => metadata?.hasAudio);
+
+  for (let i = 0; i < inputPaths.length; i += 1) {
+    const metadata = metadataList[i] || { fps: 30, duration: 0, hasAudio: false };
+    const fps = Number.isFinite(metadata.fps) && metadata.fps > 0 ? metadata.fps : 30;
+    const trimSeconds = trimFrames / fps;
+    const startTrim = i === 0 ? 0 : trimSeconds;
+    const endTrim = i === inputPaths.length - 1 ? 0 : trimSeconds;
+    const startFrames = i === 0 ? 0 : trimFrames;
+    const endFrames = i === inputPaths.length - 1 ? 0 : trimFrames;
+    const duration = Number(metadata.duration) || 0;
+    const trimmedDuration = duration > 0 ? Math.max(0.001, duration - startTrim - endTrim) : 0;
+    const vLabel = `cv${i}`;
+    const aLabel = `ca${i}`;
+    const videoFilters = [];
+
+    if (startFrames > 0) videoFilters.push(`trim=start_frame=${startFrames}`);
+    if (endFrames > 0) videoFilters.push("reverse", `trim=start_frame=${endFrames}`, "reverse");
+    videoFilters.push("setpts=PTS-STARTPTS", "format=yuv420p");
+    filters.push(`[${i}:v]${videoFilters.join(",")}[${vLabel}]`);
+    videoLabels.push(`[${vLabel}]`);
+    if (!includeAudio) continue;
+
+    if (metadata.hasAudio) {
+      const audioFilters = [];
+      if (startTrim > 0) audioFilters.push(`atrim=start=${startTrim.toFixed(6)}`);
+      if (endTrim > 0) audioFilters.push("areverse", `atrim=start=${endTrim.toFixed(6)}`, "areverse");
+      audioFilters.push("asetpts=PTS-STARTPTS", "aformat=sample_rates=48000:channel_layouts=stereo");
+      filters.push(`[${i}:a]${audioFilters.join(",")}[${aLabel}]`);
+    } else {
+      filters.push(`anullsrc=r=48000:cl=stereo,atrim=duration=${Math.max(0.001, trimmedDuration || duration).toFixed(6)}[${aLabel}]`);
+    }
+    streamLabels.push(`[${vLabel}][${aLabel}]`);
+  }
+
+  if (!includeAudio) {
+    filters.push(`${videoLabels.join("")}concat=n=${inputPaths.length}:v=1:a=0[vout]`);
+    return [
+      ...args,
+      "-filter_complex", filters.join(";"),
+      "-map", "[vout]",
+      "-c:v", "libx264",
+      "-preset", "veryfast",
+      "-pix_fmt", "yuv420p",
+      "-movflags", "+faststart",
+      outputName,
+    ];
+  }
+
+  filters.push(`${streamLabels.join("")}concat=n=${inputPaths.length}:v=1:a=1[vout][aout]`);
+
+  return [
+    ...args,
+    "-filter_complex", filters.join(";"),
+    "-map", "[vout]",
+    "-map", "[aout]",
+    "-c:v", "libx264",
+    "-preset", "veryfast",
+    "-pix_fmt", "yuv420p",
+    "-c:a", "aac",
+    "-b:a", "192k",
+    "-movflags", "+faststart",
+    outputName,
+  ];
 }
 
 function downloadBlob(blobLike, fileName, logElement = null) {
@@ -713,6 +1003,8 @@ async function ensureFFmpeg(tool) {
       const ffmpeg = new ffmpegModules.FFmpeg();
       ffmpeg.on("log", ({ message }) => {
         if (String(message || "").trim() === "Aborted()") return;
+        if (ffmpegState.logCapture) ffmpegState.logCapture.push(String(message || ""));
+        if (ffmpegState.suppressLogRouting) return;
         routeLog(message);
       });
       ffmpeg.on("progress", ({ progress }) => routeProgress(progress));
@@ -740,6 +1032,8 @@ function resetFFmpegState() {
   ffmpegState.busy = false;
   ffmpegState.activeTool = null;
   ffmpegState.cancelCurrent = null;
+  ffmpegState.logCapture = null;
+  ffmpegState.suppressLogRouting = false;
 }
 
 function cancelCurrentTask(message) {
@@ -3143,10 +3437,17 @@ function initConcatTool() {
     run: document.getElementById("concatRun"),
     clear: document.getElementById("concatClear"),
     cancel: document.getElementById("concatCancel"),
+    trimFrames: document.getElementById("concatTrimFrames"),
+    trimFramesValue: document.getElementById("concatTrimFramesValue"),
     progress: document.getElementById("concatProgress"),
     status: document.getElementById("concatStatus"),
     log: document.getElementById("concatLog"),
   };
+
+  concatEls.trimFrames?.addEventListener("input", () => {
+    concatState.trimFrames = getConcatTrimFramesFromInput();
+    updateConcatTrimDisplay();
+  });
 
   concatEls.list.addEventListener("click", (event) => {
     const button = event.target.closest("button[data-action]");
@@ -3191,23 +3492,38 @@ function initConcatTool() {
         let preparedInputs = null;
         try {
           preparedInputs = await prepareConcatInputs(ffmpeg);
-          await ffmpeg.writeFile("concat_list.txt", preparedInputs.listLines.join("\n"));
-          createdFiles.push("concat_list.txt");
+          concatState.trimFrames = getConcatTrimFramesFromInput();
+          const trimFrames = getConcatTrimFrames();
           const firstExt = splitName(concatState.items[0].file.name).ext || ".mp4";
-          const outputName = `${sanitizeBaseName(concatState.items[0].file.name)}-concat${firstExt}`;
+          const outputName = trimFrames > 0
+            ? `${sanitizeBaseName(concatState.items[0].file.name)}-concat-trim${trimFrames}f.mp4`
+            : `${sanitizeBaseName(concatState.items[0].file.name)}-concat${firstExt}`;
           createdFiles.push(outputName);
-          const exitCode = await ffmpeg.exec([
-            "-f", "concat",
-            "-safe", "0",
-            "-i", "concat_list.txt",
-            "-c", "copy",
-            outputName,
-          ]);
+
+          let ffmpegArgs;
+          if (trimFrames > 0) {
+            appendLog(concatEls.log, `つなぎ目トリム: ${trimFrames} フレーム（各つなぎ目で前後合計 ${trimFrames * 2} フレーム）`);
+            const metadataList = await probeConcatInputs(ffmpeg, preparedInputs.inputPaths, concatState.items.map((item) => item.file), createdFiles);
+            ffmpegArgs = buildTrimmedConcatCommand(preparedInputs.inputPaths, metadataList, trimFrames, outputName);
+          } else {
+            await ffmpeg.writeFile("concat_list.txt", preparedInputs.listLines.join("\n"));
+            createdFiles.push("concat_list.txt");
+            appendLog(concatEls.log, "つなぎ目トリム: 0 フレーム。stream copy で連結します。");
+            ffmpegArgs = [
+              "-f", "concat",
+              "-safe", "0",
+              "-i", "concat_list.txt",
+              "-c", "copy",
+              outputName,
+            ];
+          }
+
+          const exitCode = await ffmpeg.exec(ffmpegArgs);
           if (exitCode !== 0) {
             throw new Error("ffmpeg が 0 以外の終了コードを返しました。素材条件が揃っているか確認してください。");
           }
           const data = await ffmpeg.readFile(outputName);
-          const mimeType = concatState.items[0].file.type || "video/mp4";
+          const mimeType = trimFrames > 0 ? "video/mp4" : concatState.items[0].file.type || "video/mp4";
           const outputBlob = new Blob([data], { type: mimeType });
           appendLog(concatEls.log, `ffmpeg 出力サイズ: ${formatBytes(outputBlob.size)}`);
           downloadBlob(outputBlob, outputName, concatEls.log);
@@ -3222,15 +3538,19 @@ function initConcatTool() {
       });
     } catch (error) {
       if (/terminated|abort/i.test(String(error?.message || ""))) return;
+      const retryHint = getConcatTrimFramesFromInput() > 0
+        ? "処理ログを確認してください。"
+        : "同一パラメータの動画だけで再試行してください。";
       setStatus(
         concatEls.status,
-        `連結に失敗しました。${error.message || error} 同一パラメータの動画だけで再試行してください。`,
+        `連結に失敗しました。${error.message || error} ${retryHint}`,
         "error"
       );
     }
   });
 
   setupDropzone(concatEls.drop, concatEls.input, addConcatFiles);
+  updateConcatTrimDisplay();
   renderConcatList();
 }
 
