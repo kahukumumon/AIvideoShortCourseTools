@@ -6,6 +6,13 @@ const ffmpegModules = {
   vendorModuleURL: null,
 };
 
+const webCodecsModules = {
+  ready: null,
+  mp4box: null,
+  Muxer: null,
+  ArrayBufferTarget: null,
+};
+
 const ffmpegState = {
   instance: null,
   loading: null,
@@ -681,6 +688,21 @@ function routeProgress(progress) {
   }
 }
 
+async function ensureWebCodecsModules() {
+  if (!webCodecsModules.ready) {
+    webCodecsModules.ready = (async () => {
+      const [mp4boxModule, muxerModule] = await Promise.all([
+        import("https://cdn.jsdelivr.net/npm/mp4box@2.3.0/+esm"),
+        import("https://cdn.jsdelivr.net/npm/mp4-muxer@5.2.2/+esm"),
+      ]);
+      webCodecsModules.mp4box = mp4boxModule.default ?? mp4boxModule;
+      webCodecsModules.Muxer = muxerModule.Muxer;
+      webCodecsModules.ArrayBufferTarget = muxerModule.ArrayBufferTarget;
+    })();
+  }
+  return webCodecsModules.ready;
+}
+
 async function ensureFFmpeg(tool) {
   ffmpegState.activeTool = tool;
   await ensureFFmpegModules();
@@ -811,6 +833,11 @@ async function withCancelableTask(tool, runner) {
     disableButtons(false, ugoiraEls?.cancel);
     setProgress(ugoiraEls?.progress, 0);
   }
+  if (tool === "videoMosaic") {
+    disableButtons(true, videoMosaicEls?.run);
+    disableButtons(false, videoMosaicEls?.cancel);
+    setProgress(videoMosaicEls?.progress, 0);
+  }
 
   try {
     const result = await runner(controller.signal);
@@ -826,6 +853,10 @@ async function withCancelableTask(tool, runner) {
     if (tool === "ugoira") {
       disableButtons(false, ugoiraEls?.run);
       disableButtons(true, ugoiraEls?.cancel);
+    }
+    if (tool === "videoMosaic") {
+      disableButtons(false, videoMosaicEls?.run);
+      disableButtons(true, videoMosaicEls?.cancel);
     }
     ffmpegState.activeTool = null;
     ffmpegState.cancelCurrent = null;
@@ -2188,13 +2219,100 @@ function buildVideoMosaicPath(context, width, height, mask = videoMosaicState.ma
   context.closePath();
 }
 
+function computeVideoMosaicOuterTangents(a, b) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const distance = Math.hypot(dx, dy);
+  if (!Number.isFinite(distance) || distance <= 0) return [];
+
+  const r1 = Math.max(0, a.radius);
+  const r2 = Math.max(0, b.radius);
+  const ratio = (r1 - r2) / distance;
+  if (Math.abs(ratio) > 1) return [];
+
+  const baseX = dx / distance;
+  const baseY = dy / distance;
+  const orthX = -baseY;
+  const orthY = baseX;
+  const offset = Math.sqrt(Math.max(0, 1 - ratio * ratio));
+
+  return [-1, 1].map((sign) => {
+    const nx = baseX * ratio + orthX * offset * sign;
+    const ny = baseY * ratio + orthY * offset * sign;
+    return {
+      ax: a.x + nx * r1,
+      ay: a.y + ny * r1,
+      bx: b.x + nx * r2,
+      by: b.y + ny * r2,
+    };
+  });
+}
+
+function getVideoMosaicGeometry(width, height, mask = videoMosaicState.mask) {
+  const circles = getVideoMosaicPixelCircles(width, height, mask);
+  const pointA = {
+    x: clamp(circles.circleA.cx, 0, width - 1),
+    y: clamp(circles.circleA.cy, 0, height - 1),
+    radius: Math.max(0, circles.circleA.r),
+  };
+  const pointB = {
+    x: clamp(circles.circleB.cx, 0, width - 1),
+    y: clamp(circles.circleB.cy, 0, height - 1),
+    radius: Math.max(0, circles.circleB.r),
+  };
+  const minX = clamp(Math.min(pointA.x - pointA.radius, pointB.x - pointB.radius), 0, width - 1);
+  const maxX = clamp(Math.max(pointA.x + pointA.radius, pointB.x + pointB.radius), minX + 1, width);
+  const minY = clamp(Math.min(pointA.y - pointA.radius, pointB.y - pointB.radius), 0, height - 1);
+  const maxY = clamp(Math.max(pointA.y + pointA.radius, pointB.y + pointB.radius), minY + 1, height);
+  return {
+    pointA,
+    pointB,
+    tangents: computeVideoMosaicOuterTangents(pointA, pointB),
+    bounds: {
+      x: minX,
+      y: minY,
+      width: Math.max(1, maxX - minX),
+      height: Math.max(1, maxY - minY),
+    },
+  };
+}
+
+function isPointInsideVideoMosaicCircle(x, y, point) {
+  return Math.hypot(x - point.x, y - point.y) <= Math.max(0, point.radius);
+}
+
+function isPointInsideVideoMosaicConvexPolygon(x, y, points) {
+  let sign = 0;
+  for (let i = 0; i < points.length; i += 1) {
+    const current = points[i];
+    const next = points[(i + 1) % points.length];
+    const cross = (next.x - current.x) * (y - current.y) - (next.y - current.y) * (x - current.x);
+    if (Math.abs(cross) < 0.0001) continue;
+    const currentSign = Math.sign(cross);
+    if (sign === 0) {
+      sign = currentSign;
+      continue;
+    }
+    if (sign !== currentSign) return false;
+  }
+  return true;
+}
+
+function isPointInVideoMosaicGeometry(x, y, geometry) {
+  if (isPointInsideVideoMosaicCircle(x, y, geometry.pointA) || isPointInsideVideoMosaicCircle(x, y, geometry.pointB)) {
+    return true;
+  }
+  if (geometry.tangents.length < 2) return false;
+  return isPointInsideVideoMosaicConvexPolygon(x, y, [
+    { x: geometry.tangents[0].ax, y: geometry.tangents[0].ay },
+    { x: geometry.tangents[0].bx, y: geometry.tangents[0].by },
+    { x: geometry.tangents[1].bx, y: geometry.tangents[1].by },
+    { x: geometry.tangents[1].ax, y: geometry.tangents[1].ay },
+  ]);
+}
+
 function isPointInVideoMosaicMask(point, width, height) {
-  const canvas = document.createElement("canvas");
-  canvas.width = width;
-  canvas.height = height;
-  const context = canvas.getContext("2d");
-  buildVideoMosaicPath(context, width, height);
-  return context.isPointInPath(point.x, point.y);
+  return isPointInVideoMosaicGeometry(point.x, point.y, getVideoMosaicGeometry(width, height));
 }
 
 function hitVideoMosaicHandle(point) {
@@ -2220,23 +2338,74 @@ function hitVideoMosaicHandle(point) {
 }
 
 function drawVideoMosaicPixelArea(context, sourceCanvas, width, height) {
-  const pixelSize = getMosaicPixelSize(width, height);
-  const smallWidth = Math.max(1, Math.ceil(width / pixelSize));
-  const smallHeight = Math.max(1, Math.ceil(height / pixelSize));
-  const temp = document.createElement("canvas");
-  temp.width = smallWidth;
-  temp.height = smallHeight;
-  const tempCtx = temp.getContext("2d", { alpha: false });
-  tempCtx.imageSmoothingEnabled = false;
-  tempCtx.drawImage(sourceCanvas, 0, 0, width, height, 0, 0, smallWidth, smallHeight);
+  const sourceCtx = sourceCanvas.getContext("2d", { willReadFrequently: true });
+  const frame = sourceCtx.getImageData(0, 0, width, height);
+  applyVideoMosaicShapeToImageData(frame, getVideoMosaicGeometry(width, height), getVideoMosaicBlockSize(width, height));
+  context.putImageData(frame, 0, 0);
+}
 
-  context.save();
-  buildVideoMosaicPath(context, width, height);
-  context.clip();
-  context.imageSmoothingEnabled = false;
-  context.drawImage(temp, 0, 0, smallWidth, smallHeight, 0, 0, width, height);
-  context.restore();
-  context.imageSmoothingEnabled = true;
+function getVideoMosaicBlockSize(width, height) {
+  return Math.max(4, Math.round(Math.max(width, height) / 100));
+}
+
+function applyVideoMosaicShapeToImageData(imageData, geometry, blockSize) {
+  const safeBlock = Math.max(4, Math.floor(blockSize));
+  const startX = Math.floor(geometry.bounds.x);
+  const startY = Math.floor(geometry.bounds.y);
+  const width = Math.max(1, Math.ceil(geometry.bounds.width));
+  const height = Math.max(1, Math.ceil(geometry.bounds.height));
+  const { data } = imageData;
+  const imageWidth = imageData.width;
+  const imageHeight = imageData.height;
+
+  for (let by = 0; by < height; by += safeBlock) {
+    for (let bx = 0; bx < width; bx += safeBlock) {
+      const endX = Math.min(width, bx + safeBlock);
+      const endY = Math.min(height, by + safeBlock);
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      let a = 0;
+      let count = 0;
+
+      for (let yy = by; yy < endY; yy += 1) {
+        const absoluteY = startY + yy;
+        if (absoluteY < 0 || absoluteY >= imageHeight) continue;
+        for (let xx = bx; xx < endX; xx += 1) {
+          const absoluteX = startX + xx;
+          if (absoluteX < 0 || absoluteX >= imageWidth) continue;
+          if (!isPointInVideoMosaicGeometry(absoluteX + 0.5, absoluteY + 0.5, geometry)) continue;
+          const idx = (absoluteY * imageWidth + absoluteX) * 4;
+          r += data[idx];
+          g += data[idx + 1];
+          b += data[idx + 2];
+          a += data[idx + 3];
+          count += 1;
+        }
+      }
+      if (count === 0) continue;
+
+      const avgR = Math.round(r / count);
+      const avgG = Math.round(g / count);
+      const avgB = Math.round(b / count);
+      const avgA = Math.round(a / count);
+
+      for (let yy = by; yy < endY; yy += 1) {
+        const absoluteY = startY + yy;
+        if (absoluteY < 0 || absoluteY >= imageHeight) continue;
+        for (let xx = bx; xx < endX; xx += 1) {
+          const absoluteX = startX + xx;
+          if (absoluteX < 0 || absoluteX >= imageWidth) continue;
+          if (!isPointInVideoMosaicGeometry(absoluteX + 0.5, absoluteY + 0.5, geometry)) continue;
+          const idx = (absoluteY * imageWidth + absoluteX) * 4;
+          data[idx] = avgR;
+          data[idx + 1] = avgG;
+          data[idx + 2] = avgB;
+          data[idx + 3] = avgA;
+        }
+      }
+    }
+  }
 }
 
 function drawVideoMosaicGuide(context, width, height) {
@@ -2313,7 +2482,7 @@ function drawVideoMosaicFrame() {
     drawVideoMosaicGuide(videoMosaicCtx, width, height);
   }
   videoMosaicEls.time.value = String(video.currentTime || 0);
-  videoMosaicEls.caption.textContent = `${item.file.name} / ${item.metadata.width}×${item.metadata.height} / モザイク ${getMosaicPixelSize(item.metadata.width, item.metadata.height)}px`;
+  videoMosaicEls.caption.textContent = `${item.file.name} / ${item.metadata.width}×${item.metadata.height} / モザイク ${getVideoMosaicBlockSize(item.metadata.width, item.metadata.height)}px`;
 }
 
 function scheduleVideoMosaicFrame() {
@@ -2359,7 +2528,7 @@ function renderVideoMosaicList() {
   });
   setStatus(
     videoMosaicEls.status,
-    `${videoMosaicState.items.length} 本追加済み。ピクセルサイズは各動画の長辺 1/100 で自動算出します。${hasRatioWarning ? " 縦横比が異なる動画が含まれます。" : ""}`,
+    `${videoMosaicState.items.length} 本追加済み。ピクセルサイズは各動画の長辺 1/100 以上 4px で自動算出します。${hasRatioWarning ? " 縦横比が異なる動画が含まれます。" : ""}`,
     hasRatioWarning ? "error" : "default"
   );
 
@@ -2369,7 +2538,7 @@ function renderVideoMosaicList() {
     row.innerHTML = `
       <div>
         <div class="list-title">${index + 1}. ${item.file.name}</div>
-        <div class="list-sub">${item.metadata.width}×${item.metadata.height} / ${formatSeconds(item.metadata.duration)} / ${formatBytes(item.file.size)} / mosaic ${getMosaicPixelSize(item.metadata.width, item.metadata.height)}px</div>
+        <div class="list-sub">${item.metadata.width}×${item.metadata.height} / ${formatSeconds(item.metadata.duration)} / ${formatBytes(item.file.size)} / mosaic ${getVideoMosaicBlockSize(item.metadata.width, item.metadata.height)}px</div>
       </div>
       <div class="item-actions">
         <button class="secondary" type="button" data-action="select" data-id="${item.id}">表示</button>
@@ -2522,6 +2691,315 @@ function getVideoMosaicOutputName(file) {
   return `${base}_mosaic.mp4`;
 }
 
+function normalizeVideoMosaicFps(fps) {
+  if (!Number.isFinite(fps) || fps <= 0) return 30;
+  return clamp(fps, 1, 240);
+}
+
+function normalizeVideoMosaicEncoderSize(width, height) {
+  const safeWidth = Math.max(2, Math.round(width));
+  const safeHeight = Math.max(2, Math.round(height));
+  return {
+    width: safeWidth % 2 === 0 ? safeWidth : safeWidth - 1,
+    height: safeHeight % 2 === 0 ? safeHeight : safeHeight - 1,
+  };
+}
+
+function chooseVideoMosaicBitrate(width, height, fps) {
+  return Math.max(4_000_000, Math.round(width * height * Math.max(1, fps) * 0.1));
+}
+
+function buildVideoMosaicAvcConfigCandidates(width, height, bitrate, framerate) {
+  const avc = [
+    "avc1.640034",
+    "avc1.640033",
+    "avc1.640032",
+    "avc1.640029",
+    "avc1.640028",
+    "avc1.64001F",
+    "avc1.4D4034",
+    "avc1.4D4033",
+    "avc1.4D4032",
+    "avc1.4D4029",
+    "avc1.4D4028",
+    "avc1.4D401F",
+    "avc1.42E034",
+    "avc1.42E033",
+    "avc1.42E032",
+    "avc1.42E029",
+    "avc1.42E028",
+    "avc1.42E01F",
+    "avc1",
+  ].map((codec) => ({ muxerCodec: "avc", config: { codec, width, height, bitrate, framerate, hardwareAcceleration: "prefer-hardware" } }));
+
+  return [
+    ...avc,
+    { muxerCodec: "vp9", config: { codec: "vp09.00.10.08", width, height, bitrate, framerate, hardwareAcceleration: "prefer-hardware" } },
+    { muxerCodec: "vp9", config: { codec: "vp09.02.10.10", width, height, bitrate, framerate, hardwareAcceleration: "prefer-hardware" } },
+    { muxerCodec: "av1", config: { codec: "av01.0.01M.08", width, height, bitrate, framerate, hardwareAcceleration: "prefer-hardware" } },
+  ];
+}
+
+async function selectVideoMosaicAvcConfig(width, height, fps) {
+  const bitrate = chooseVideoMosaicBitrate(width, height, fps);
+  for (const candidate of buildVideoMosaicAvcConfigCandidates(width, height, bitrate, fps)) {
+    try {
+      const support = await VideoEncoder.isConfigSupported(candidate.config);
+      if (support.supported) {
+        return {
+          config: support.config ?? candidate.config,
+          muxerCodec: candidate.muxerCodec,
+        };
+      }
+    } catch (_) {
+    }
+  }
+  throw new Error("この環境で利用できる WebCodecs エンコード設定が見つかりません。");
+}
+
+function buildVideoMosaicDecoderDescription(sampleDescription) {
+  if (!sampleDescription || typeof sampleDescription !== "object") return undefined;
+  const codecBox = sampleDescription.avcC ?? sampleDescription.hvcC ?? sampleDescription.vpcC ?? sampleDescription.av1C;
+  if (!codecBox || typeof codecBox.write !== "function") return undefined;
+
+  const mp4box = webCodecsModules.mp4box;
+  const stream = new mp4box.DataStream(undefined, 0, mp4box.Endianness.BIG_ENDIAN);
+  codecBox.write(stream);
+  const boxed = new Uint8Array(stream.buffer);
+  if (boxed.byteLength <= 8) return undefined;
+  return boxed.slice(8);
+}
+
+async function extractVideoMosaicMp4Track(file) {
+  await ensureWebCodecsModules();
+  const mp4box = webCodecsModules.mp4box;
+  const buffer = await file.arrayBuffer();
+  const mp4file = mp4box.createFile();
+
+  return await new Promise((resolve, reject) => {
+    let videoTrack = null;
+    let hasAudio = false;
+    const samples = [];
+    let extractionFlushed = false;
+    let done = false;
+
+    const settle = (fn) => {
+      if (done) return;
+      done = true;
+      fn();
+    };
+
+    const finalize = () => {
+      if (!videoTrack) return;
+      const expectedSamples = videoTrack.nb_samples || 0;
+      if (expectedSamples > 0 && samples.length < expectedSamples) return;
+      if (expectedSamples === 0 && (!extractionFlushed || samples.length === 0)) return;
+      const durationSec = Math.max(0, (videoTrack.duration || 0) / Math.max(1, videoTrack.timescale || 1));
+      settle(() => resolve({
+        codec: videoTrack.codec,
+        width: Math.max(1, Math.round(videoTrack.video?.width ?? videoTrack.track_width ?? 1)),
+        height: Math.max(1, Math.round(videoTrack.video?.height ?? videoTrack.track_height ?? 1)),
+        timescale: Math.max(1, videoTrack.timescale || 1),
+        durationSec,
+        expectedSamples: expectedSamples > 0 ? expectedSamples : samples.length,
+        fps: durationSec > 0 ? (expectedSamples || samples.length) / durationSec : 30,
+        description: buildVideoMosaicDecoderDescription(samples[0]?.description),
+        samples,
+        hasAudio,
+      }));
+    };
+
+    mp4file.onError = (error) => settle(() => reject(error instanceof Error ? error : new Error(String(error))));
+    mp4file.onReady = (info) => {
+      videoTrack = info.videoTracks?.[0] ?? info.tracks?.find((track) => Boolean(track?.video)) ?? null;
+      hasAudio = Boolean(info.audioTracks?.length || info.tracks?.some((track) => Boolean(track?.audio)));
+      if (!videoTrack) {
+        settle(() => reject(new Error("MP4 内に動画トラックが見つかりません。")));
+        return;
+      }
+      mp4file.setExtractionOptions(videoTrack.id, null, { nbSamples: 1000 });
+      mp4file.start();
+    };
+    mp4file.onSamples = (_id, _user, extracted) => {
+      samples.push(...extracted);
+      finalize();
+    };
+
+    const tagged = buffer;
+    tagged.fileStart = 0;
+    mp4file.appendBuffer(tagged);
+    extractionFlushed = true;
+    mp4file.flush();
+    queueMicrotask(finalize);
+  });
+}
+
+async function remuxVideoMosaicAudioIfPresent(videoBlob, originalFile, outputName, hasAudio, signal) {
+  if (!hasAudio) return videoBlob;
+  throwIfAborted(signal);
+  appendLog(videoMosaicEls.log, "音声トラックを元動画から stream copy で結合します。");
+  const ffmpeg = await ensureFFmpeg("videoMosaic");
+  const inputVideoName = "video_mosaic_webcodecs_video.mp4";
+  const inputOriginalName = `video_mosaic_audio_source${splitName(originalFile.name).ext || ".mp4"}`;
+  const muxedName = `muxed_${outputName}`;
+  try {
+    await ffmpeg.writeFile(inputVideoName, await ffmpegModules.fetchFile(videoBlob));
+    await ffmpeg.writeFile(inputOriginalName, await ffmpegModules.fetchFile(originalFile));
+    const exitCode = await ffmpeg.exec([
+      "-i", inputVideoName,
+      "-i", inputOriginalName,
+      "-map", "0:v:0",
+      "-map", "1:a?",
+      "-c", "copy",
+      "-shortest",
+      muxedName,
+    ]);
+    if (exitCode !== 0) {
+      throw new Error(`音声結合 ffmpeg が終了コード ${exitCode} を返しました。`);
+    }
+    const data = await ffmpeg.readFile(muxedName);
+    return new Blob([data], { type: "video/mp4" });
+  } finally {
+    await removeFiles(ffmpeg, [inputVideoName, inputOriginalName, muxedName]);
+  }
+}
+
+async function renderVideoMosaicWithWebCodecs(item, signal, onProgress) {
+  if (typeof VideoDecoder === "undefined" || typeof VideoEncoder === "undefined" || typeof EncodedVideoChunk === "undefined") {
+    throw new Error("このブラウザは WebCodecs(VideoDecoder/VideoEncoder) に対応していません。");
+  }
+
+  const parsed = await extractVideoMosaicMp4Track(item.file);
+  const outputSize = normalizeVideoMosaicEncoderSize(parsed.width, parsed.height);
+  const fps = normalizeVideoMosaicFps(parsed.fps);
+  const encoderSelection = await selectVideoMosaicAvcConfig(outputSize.width, outputSize.height, fps);
+  const encoderConfig = encoderSelection.config;
+  const decoderConfig = {
+    codec: parsed.codec,
+    codedWidth: parsed.width,
+    codedHeight: parsed.height,
+  };
+  if (parsed.description?.byteLength > 0) decoderConfig.description = parsed.description;
+
+  const decoderSupport = await VideoDecoder.isConfigSupported(decoderConfig);
+  if (!decoderSupport.supported) {
+    throw new Error(`この動画コーデックは WebCodecs デコードに対応していません: ${parsed.codec}`);
+  }
+
+  appendLog(
+    videoMosaicEls.log,
+    `WebCodecs: decode ${parsed.codec} / encode ${encoderConfig.codec} / ${parsed.width}×${parsed.height} -> ${outputSize.width}×${outputSize.height} / ${fps.toFixed(3)}fps / ${parsed.expectedSamples} frames`
+  );
+
+  const canvas = document.createElement("canvas");
+  canvas.width = outputSize.width;
+  canvas.height = outputSize.height;
+  const context = canvas.getContext("2d", { willReadFrequently: true, alpha: false });
+  if (!context) throw new Error("Canvas 2D context を取得できません。");
+
+  const target = new webCodecsModules.ArrayBufferTarget();
+  const muxer = new webCodecsModules.Muxer({
+    target,
+    video: {
+      codec: encoderSelection.muxerCodec,
+      width: outputSize.width,
+      height: outputSize.height,
+    },
+    fastStart: "in-memory",
+    firstTimestampBehavior: "offset",
+  });
+
+  let encoderError = null;
+  const encoder = new VideoEncoder({
+    output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+    error: (error) => {
+      encoderError = error instanceof Error ? error : new Error(String(error));
+    },
+  });
+  encoder.configure(encoderConfig);
+
+  let decoderError = null;
+  let processed = 0;
+  const total = Math.max(1, parsed.expectedSamples || parsed.samples.length);
+  const frameDurationUs = Math.round(1_000_000 / Math.max(1, fps));
+
+  const decoder = new VideoDecoder({
+    output: (frame) => {
+      try {
+        throwIfAborted(signal);
+        context.drawImage(frame, 0, 0, outputSize.width, outputSize.height);
+        const imageData = context.getImageData(0, 0, outputSize.width, outputSize.height);
+        applyVideoMosaicShapeToImageData(
+          imageData,
+          getVideoMosaicGeometry(outputSize.width, outputSize.height),
+          getVideoMosaicBlockSize(outputSize.width, outputSize.height)
+        );
+        context.putImageData(imageData, 0, 0);
+
+        const timestamp = Number.isFinite(frame.timestamp) ? Math.max(0, Math.round(frame.timestamp)) : processed * frameDurationUs;
+        const encodedFrame = new VideoFrame(canvas, { timestamp, duration: frame.duration || frameDurationUs });
+        encoder.encode(encodedFrame, { keyFrame: processed % Math.max(1, Math.round(fps * 2)) === 0 });
+        encodedFrame.close();
+
+        processed += 1;
+        if (processed % 8 === 0 || processed === total) {
+          onProgress(processed, total);
+        }
+      } catch (error) {
+        decoderError = error instanceof Error ? error : new Error(String(error));
+      } finally {
+        frame.close();
+      }
+    },
+    error: (error) => {
+      decoderError = error instanceof Error ? error : new Error(String(error));
+    },
+  });
+  decoder.configure(decoderSupport.config ?? decoderConfig);
+
+  try {
+    for (let i = 0; i < parsed.samples.length; i += 1) {
+      throwIfAborted(signal);
+      if (decoderError) throw decoderError;
+      if (encoderError) throw encoderError;
+      const sample = parsed.samples[i];
+      if (!sample.data || sample.data.byteLength === 0) {
+        throw new Error(`MP4 sample payload が空です: ${i}`);
+      }
+      const timestamp = Math.round((sample.cts / parsed.timescale) * 1_000_000);
+      const duration = Math.max(1, Math.round((Math.max(0, sample.duration || 0) / parsed.timescale) * 1_000_000));
+      decoder.decode(new EncodedVideoChunk({
+        type: sample.is_sync ? "key" : "delta",
+        timestamp,
+        duration,
+        data: sample.data,
+      }));
+      if (decoder.decodeQueueSize > 24) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+    }
+
+    await decoder.flush();
+    if (decoderError) throw decoderError;
+    await encoder.flush();
+    if (encoderError) throw encoderError;
+    muxer.finalize();
+    return {
+      blob: new Blob([target.buffer], { type: "video/mp4" }),
+      hasAudio: parsed.hasAudio,
+    };
+  } finally {
+    try {
+      decoder.close();
+    } catch (_) {
+    }
+    try {
+      encoder.close();
+    } catch (_) {
+    }
+  }
+}
+
 async function exportVideoMosaicAll() {
   if (videoMosaicState.items.length === 0) {
     setStatus(videoMosaicEls.status, "先に動画を追加してください。", "error");
@@ -2530,60 +3008,23 @@ async function exportVideoMosaicAll() {
   appendLog(videoMosaicEls.log, "動画固定モザイクの書き出しを開始します。");
   setStatus(videoMosaicEls.status, "全動画へ固定モザイクを適用しています。", "default");
 
-  await withFFmpegTask("videoMosaic", async (ffmpeg) => {
-    const createdFiles = [];
-    try {
-      for (let i = 0; i < videoMosaicState.items.length; i += 1) {
-        const item = videoMosaicState.items[i];
-        const ext = splitName(item.file.name).ext || ".mp4";
-        const inputName = `video_mosaic_input_${i}${ext}`;
-        const maskName = `video_mosaic_mask_${i}.png`;
-        const outputName = getVideoMosaicOutputName(item.file);
-        const width = item.metadata.width;
-        const height = item.metadata.height;
-        const pixelSize = getMosaicPixelSize(width, height);
-        const smallWidth = Math.max(1, Math.ceil(width / pixelSize));
-        const smallHeight = Math.max(1, Math.ceil(height / pixelSize));
-
-        appendLog(videoMosaicEls.log, `入力準備: ${item.file.name}`);
-        await ffmpeg.writeFile(inputName, await ffmpegModules.fetchFile(item.file));
-        await ffmpeg.writeFile(maskName, await createVideoMosaicMaskBytes(width, height));
-        createdFiles.push(inputName, maskName, outputName);
-
-        appendLog(videoMosaicEls.log, `モザイク適用: ${width}×${height} / pixel ${pixelSize}px / ${outputName}`);
-        const filter = [
-          `[0:v]split[base][pix]`,
-          `[pix]scale=${smallWidth}:${smallHeight}:flags=neighbor,scale=${width}:${height}:flags=neighbor[mosaic]`,
-          `[mosaic][1:v]alphamerge[masked]`,
-          `[base][masked]overlay=format=auto,format=yuv420p[outv]`,
-        ].join(";");
-        const exitCode = await ffmpeg.exec([
-          "-i", inputName,
-          "-loop", "1",
-          "-i", maskName,
-          "-filter_complex", filter,
-          "-map", "[outv]",
-          "-map", "0:a?",
-          "-c:v", "libx264",
-          "-preset", "veryfast",
-          "-c:a", "copy",
-          "-shortest",
-          "-t", Math.max(0.01, item.metadata.duration).toFixed(6),
-          outputName,
-        ]);
-        if (exitCode !== 0) {
-          throw new Error(`ffmpeg が終了コード ${exitCode} を返しました。`);
-        }
-        const data = await ffmpeg.readFile(outputName);
-        const outputBlob = new Blob([data], { type: "video/mp4" });
-        downloadBlob(outputBlob, outputName, videoMosaicEls.log);
-        appendLog(videoMosaicEls.log, `出力完了: ${outputName} / ${formatBytes(outputBlob.size)}`);
-        setProgress(videoMosaicEls.progress, (i + 1) / videoMosaicState.items.length);
-      }
-      setStatus(videoMosaicEls.status, `${videoMosaicState.items.length} 本の書き出しが完了しました。`, "success");
-    } finally {
-      await removeFiles(ffmpeg, createdFiles);
+  await withCancelableTask("videoMosaic", async (signal) => {
+    await ensureWebCodecsModules();
+    for (let i = 0; i < videoMosaicState.items.length; i += 1) {
+      const item = videoMosaicState.items[i];
+      const outputName = getVideoMosaicOutputName(item.file);
+      appendLog(videoMosaicEls.log, `WebCodecs モザイク適用: ${item.file.name}`);
+      const rendered = await renderVideoMosaicWithWebCodecs(item, signal, (processed, total) => {
+        const itemBase = i / videoMosaicState.items.length;
+        const itemRatio = processed / Math.max(1, total);
+        setProgress(videoMosaicEls.progress, itemBase + itemRatio / videoMosaicState.items.length);
+      });
+      const outputBlob = await remuxVideoMosaicAudioIfPresent(rendered.blob, item.file, outputName, rendered.hasAudio, signal);
+      downloadBlob(outputBlob, outputName, videoMosaicEls.log);
+      appendLog(videoMosaicEls.log, `出力完了: ${outputName} / ${formatBytes(outputBlob.size)}`);
+      setProgress(videoMosaicEls.progress, (i + 1) / videoMosaicState.items.length);
     }
+    setStatus(videoMosaicEls.status, `${videoMosaicState.items.length} 本の書き出しが完了しました。`, "success");
   });
 }
 
