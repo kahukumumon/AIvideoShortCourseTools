@@ -1,0 +1,32 @@
+:root {
+  --brand: #2f7569;
+  --brand-deep: #1d5148;
+  --brand-soft: rgba(47, 117, 105, 0.12);
+}
+
+.video-frame {
+  margin-top: 16px;
+}
+
+.file-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.file-item {
+  align-items: center;
+  background: var(--brand-soft);
+  border: 1px solid rgba(47, 117, 105, 0.25);
+  border-radius: 8px;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+}
+
+.file-item span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

@@ -93,3 +93,9 @@
   --brand-deep: #244d64;
   --brand-soft: rgba(62, 111, 140, 0.12);
 }
+
+.tool-card-color-match {
+  --brand: #2f7569;
+  --brand-deep: #1d5148;
+  --brand-soft: rgba(47, 117, 105, 0.12);
+}
