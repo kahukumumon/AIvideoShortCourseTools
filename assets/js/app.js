@@ -2155,11 +2155,15 @@ function isPointInMosaicRegion(region, point) {
 function getMosaicHandles(region) {
   const halfW = region.width / 2;
   const halfH = region.height / 2;
-  const corners = [
+  const resizeHandles = [
     { key: "nw", localX: -halfW, localY: -halfH },
+    { key: "n", localX: 0, localY: -halfH },
     { key: "ne", localX: halfW, localY: -halfH },
+    { key: "e", localX: halfW, localY: 0 },
     { key: "se", localX: halfW, localY: halfH },
+    { key: "s", localX: 0, localY: halfH },
     { key: "sw", localX: -halfW, localY: halfH },
+    { key: "w", localX: -halfW, localY: 0 },
   ].map((handle) => {
     const rotated = rotatePoint({ x: handle.localX, y: handle.localY }, region.rotation);
     return { ...handle, x: region.cx + rotated.x, y: region.cy + rotated.y };
@@ -2167,9 +2171,38 @@ function getMosaicHandles(region) {
   const rotateLocal = { x: 0, y: -halfH - 36 };
   const rotateHandle = rotatePoint(rotateLocal, region.rotation);
   return [
-    ...corners,
+    ...resizeHandles,
     { key: "rotate", localX: rotateLocal.x, localY: rotateLocal.y, x: region.cx + rotateHandle.x, y: region.cy + rotateHandle.y },
   ];
+}
+
+function resizeMosaicRegionFromHandle(origin, handle, point) {
+  const local = toMosaicLocal(origin, point);
+  const hasX = handle.includes("e") || handle.includes("w");
+  const hasY = handle.includes("n") || handle.includes("s");
+  const signX = handle.includes("w") ? -1 : handle.includes("e") ? 1 : 0;
+  const signY = handle.includes("n") ? -1 : handle.includes("s") ? 1 : 0;
+  const minSize = 32;
+
+  const fixedLocal = {
+    x: hasX ? -signX * origin.width / 2 : 0,
+    y: hasY ? -signY * origin.height / 2 : 0,
+  };
+  const width = hasX ? Math.max(minSize, (local.x - fixedLocal.x) * signX) : origin.width;
+  const height = hasY ? Math.max(minSize, (local.y - fixedLocal.y) * signY) : origin.height;
+  const centerLocal = {
+    x: hasX ? fixedLocal.x + signX * width / 2 : 0,
+    y: hasY ? fixedLocal.y + signY * height / 2 : 0,
+  };
+  const centerShift = rotatePoint(centerLocal, origin.rotation);
+
+  return {
+    ...origin,
+    cx: origin.cx + centerShift.x,
+    cy: origin.cy + centerShift.y,
+    width,
+    height,
+  };
 }
 
 function hitMosaicRegion(point) {
@@ -2384,19 +2417,11 @@ function updateMosaicDrag(point) {
     const nextAngle = Math.atan2(point.y - drag.origin.cy, point.x - drag.origin.cx);
     region.rotation = drag.origin.rotation + nextAngle - startAngle;
   } else if (drag.type === "resize") {
-    const local = toMosaicLocal(drag.origin, point);
-    const signX = drag.handle.includes("w") ? -1 : 1;
-    const signY = drag.handle.includes("n") ? -1 : 1;
-    const minSize = 32;
-    region.width = Math.max(minSize, Math.abs(local.x) * 2);
-    region.height = Math.max(minSize, Math.abs(local.y) * 2);
-    const centerLocal = {
-      x: (local.x - signX * drag.origin.width / 2) / 2,
-      y: (local.y - signY * drag.origin.height / 2) / 2,
-    };
-    const centerShift = rotatePoint(centerLocal, drag.origin.rotation);
-    region.cx = clamp(drag.origin.cx + centerShift.x, 0, mosaicState.displayWidth);
-    region.cy = clamp(drag.origin.cy + centerShift.y, 0, mosaicState.displayHeight);
+    const nextRegion = resizeMosaicRegionFromHandle(drag.origin, drag.handle, point);
+    region.cx = nextRegion.cx;
+    region.cy = nextRegion.cy;
+    region.width = nextRegion.width;
+    region.height = nextRegion.height;
   }
   drawMosaicCanvas();
 }

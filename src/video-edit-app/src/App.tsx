@@ -147,8 +147,98 @@ function getEllipseHandlePoints(mask: EllipseMask, width: number, height: number
   const left: [number, number] = [centerX - radiusX * cosA, centerY - radiusX * sinA];
   const down: [number, number] = [centerX - radiusY * sinA, centerY + radiusY * cosA];
   const up: [number, number] = [centerX + radiusY * sinA, centerY - radiusY * cosA];
+  const topRight: [number, number] = [right[0] + (up[0] - centerX), right[1] + (up[1] - centerY)];
+  const topLeft: [number, number] = [left[0] + (up[0] - centerX), left[1] + (up[1] - centerY)];
+  const bottomRight: [number, number] = [right[0] + (down[0] - centerX), right[1] + (down[1] - centerY)];
+  const bottomLeft: [number, number] = [left[0] + (down[0] - centerX), left[1] + (down[1] - centerY)];
   const rotate: [number, number] = [up[0] + (up[0] - centerX) * 0.35, up[1] + (up[1] - centerY) * 0.35];
-  return { center: [centerX, centerY] as [number, number], right, left, down, up, rotate };
+  return { center: [centerX, centerY] as [number, number], right, left, down, up, topRight, topLeft, bottomRight, bottomLeft, rotate };
+}
+
+type MosaicOverlayDragMode =
+  | 'move'
+  | 'resize-right'
+  | 'resize-left'
+  | 'resize-bottom'
+  | 'resize-top'
+  | 'resize-top-right'
+  | 'resize-top-left'
+  | 'resize-bottom-right'
+  | 'resize-bottom-left'
+  | 'rotate';
+
+export function resizeEllipseWithFixedOpposite(
+  initialMask: EllipseMask,
+  mode: MosaicOverlayDragMode,
+  pointerX: number,
+  pointerY: number,
+  width: number,
+  height: number,
+): EllipseMask {
+  const { centerX, centerY, radiusX, radiusY, cosA, sinA } = getEllipseGeometry(initialMask, width, height);
+  const axisX: [number, number] = [cosA, sinA];
+  const axisY: [number, number] = [-sinA, cosA];
+  const pointer: [number, number] = [pointerX * width, pointerY * height];
+  const minRadius = 4;
+
+  const dotFrom = (point: [number, number], origin: [number, number], axis: [number, number]) =>
+    (point[0] - origin[0]) * axis[0] + (point[1] - origin[1]) * axis[1];
+
+  const sideResize = (axis: [number, number], currentRadius: number, draggedSign: 1 | -1, resizeX: boolean): EllipseMask => {
+    const fixed: [number, number] = [
+      centerX - axis[0] * currentRadius * draggedSign,
+      centerY - axis[1] * currentRadius * draggedSign,
+    ];
+    const nextRadius = Math.max(minRadius, dotFrom(pointer, fixed, axis) * draggedSign * 0.5);
+    const nextCenter: [number, number] = [
+      fixed[0] + axis[0] * nextRadius * draggedSign,
+      fixed[1] + axis[1] * nextRadius * draggedSign,
+    ];
+    return {
+      ...initialMask,
+      cx: nextCenter[0] / width,
+      cy: nextCenter[1] / height,
+      rx: resizeX ? nextRadius / width : initialMask.rx,
+      ry: resizeX ? initialMask.ry : nextRadius / height,
+    };
+  };
+
+  switch (mode) {
+    case 'resize-right':
+      return sideResize(axisX, radiusX, 1, true);
+    case 'resize-left':
+      return sideResize(axisX, radiusX, -1, true);
+    case 'resize-bottom':
+      return sideResize(axisY, radiusY, 1, false);
+    case 'resize-top':
+      return sideResize(axisY, radiusY, -1, false);
+    case 'resize-top-right':
+    case 'resize-top-left':
+    case 'resize-bottom-right':
+    case 'resize-bottom-left': {
+      const draggedXSign = mode.endsWith('right') ? 1 : -1;
+      const draggedYSign = mode.includes('bottom') ? 1 : -1;
+      const fixed: [number, number] = [
+        centerX - axisX[0] * radiusX * draggedXSign - axisY[0] * radiusY * draggedYSign,
+        centerY - axisX[1] * radiusX * draggedXSign - axisY[1] * radiusY * draggedYSign,
+      ];
+      const nextRadiusX = Math.max(minRadius, dotFrom(pointer, fixed, axisX) * draggedXSign * 0.5);
+      const nextRadiusY = Math.max(minRadius, dotFrom(pointer, fixed, axisY) * draggedYSign * 0.5);
+      const nextCenter: [number, number] = [
+        fixed[0] + axisX[0] * nextRadiusX * draggedXSign + axisY[0] * nextRadiusY * draggedYSign,
+        fixed[1] + axisX[1] * nextRadiusX * draggedXSign + axisY[1] * nextRadiusY * draggedYSign,
+      ];
+      return {
+        ...initialMask,
+        cx: nextCenter[0] / width,
+        cy: nextCenter[1] / height,
+        rx: nextRadiusX / width,
+        ry: nextRadiusY / height,
+      };
+    }
+    default:
+      return initialMask;
+  }
 }
 
 function App() {
@@ -1043,7 +1133,11 @@ function App() {
     // 楕円のアウトライン（選択中はハンドル付き）を描画
     for (const { clip } of activeClips) {
       const { angle, centerX, centerY, radiusX, radiusY } = getEllipseGeometry(clip.mask, w, h);
-      const { center, right, left, down, up, rotate } = getEllipseHandlePoints(clip.mask, w, h);
+      const { center, right, left, down, up, topRight, topLeft, bottomRight, bottomLeft, rotate } = getEllipseHandlePoints(
+        clip.mask,
+        w,
+        h,
+      );
 
       ctx.beginPath();
       ctx.ellipse(centerX, centerY, radiusX, radiusY, angle, 0, Math.PI * 2);
@@ -1058,6 +1152,10 @@ function App() {
           [left[0], left[1], false],
           [down[0], down[1], false],
           [up[0], up[1], false],
+          [topRight[0], topRight[1], false],
+          [topLeft[0], topLeft[1], false],
+          [bottomRight[0], bottomRight[1], false],
+          [bottomLeft[0], bottomLeft[1], false],
           [rotate[0], rotate[1], true],
         ];
         for (const [hx, hy, isRotate] of handles) {
@@ -1078,7 +1176,7 @@ function App() {
   const mosaicOverlayDragRef = useRef<{
     clipId: string;
     trackId: string;
-    mode: 'move' | 'resize-right' | 'resize-left' | 'resize-bottom' | 'resize-top' | 'rotate';
+    mode: MosaicOverlayDragMode;
     originX: number;
     originY: number;
     initialMask: EllipseMask;
@@ -1099,10 +1197,18 @@ function App() {
     );
 
     for (const { clip, track } of sorted) {
-      const { center, right, left, down, up, rotate } = getEllipseHandlePoints(clip.mask, canvas.width, canvas.height);
+      const { center, right, left, down, up, topRight, topLeft, bottomRight, bottomLeft, rotate } = getEllipseHandlePoints(
+        clip.mask,
+        canvas.width,
+        canvas.height,
+      );
       const handleRadius = 12;
 
-      const hitHandles: Array<[number, number, 'move' | 'resize-right' | 'resize-left' | 'resize-bottom' | 'resize-top' | 'rotate']> = [
+      const hitHandles: Array<[number, number, MosaicOverlayDragMode]> = [
+        [topRight[0], topRight[1], 'resize-top-right'],
+        [topLeft[0], topLeft[1], 'resize-top-left'],
+        [bottomRight[0], bottomRight[1], 'resize-bottom-right'],
+        [bottomLeft[0], bottomLeft[1], 'resize-bottom-left'],
         [right[0], right[1], 'resize-right'],
         [left[0], left[1], 'resize-left'],
         [down[0], down[1], 'resize-bottom'],
@@ -1168,16 +1274,14 @@ function App() {
         newMask = { ...initialMask, cx: initialMask.cx + dx, cy: initialMask.cy + dy };
         break;
       case 'resize-right':
-        newMask = { ...initialMask, rx: Math.max(0.01, initialMask.rx + dx) };
-        break;
       case 'resize-left':
-        newMask = { ...initialMask, rx: Math.max(0.01, initialMask.rx - dx) };
-        break;
       case 'resize-bottom':
-        newMask = { ...initialMask, ry: Math.max(0.01, initialMask.ry + dy) };
-        break;
       case 'resize-top':
-        newMask = { ...initialMask, ry: Math.max(0.01, initialMask.ry - dy) };
+      case 'resize-top-right':
+      case 'resize-top-left':
+      case 'resize-bottom-right':
+      case 'resize-bottom-left':
+        newMask = resizeEllipseWithFixedOpposite(initialMask, drag.mode, mx, my, canvas.width, canvas.height);
         break;
       case 'rotate': {
         const startAngle = Math.atan2(drag.originY - initialMask.cy, drag.originX - initialMask.cx);
@@ -1817,7 +1921,3 @@ function App() {
 }
 
 export default App;
-
-
-
-
