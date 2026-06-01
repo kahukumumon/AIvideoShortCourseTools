@@ -81,8 +81,13 @@
               ガイド表示
             </label>
             <button class="ghost" id="videoMosaicReset" type="button">位置リセット</button>
+            <div class="video-mosaic-pair-row">
+              <button class="secondary" id="videoMosaicAddPair" type="button">A-Bペア追加</button>
+              <select id="videoMosaicPairSelect" aria-label="編集するA-Bペア"></select>
+              <button class="ghost" id="videoMosaicDeletePair" type="button">ペア削除</button>
+            </div>
           </div>
-          <p class="caption" id="videoMosaicCaption">2つの円を調整して、接線と円弧で囲むモザイク範囲を設定します。</p>
+          <p class="caption" id="videoMosaicCaption">A-Bペアを追加し、各ペアの2つの円で囲むモザイク範囲を設定します。</p>
         </div>
 
         <div class="subpanel video-mosaic-log-panel">

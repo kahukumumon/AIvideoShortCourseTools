@@ -40,6 +40,19 @@
   accent-color: var(--brand);
 }
 
+.video-mosaic-controls select {
+  min-height: 44px;
+  width: 100%;
+}
+
+.video-mosaic-pair-row {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: auto minmax(140px, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
 .video-mosaic-guide {
   min-height: 44px;
   white-space: nowrap;
@@ -56,6 +69,13 @@
   }
 
   .video-mosaic-controls {
+    grid-template-columns: auto minmax(96px, 1fr) auto auto;
+  }
+}
+
+@media (max-width: 420px) {
+  .video-mosaic-controls,
+  .video-mosaic-pair-row {
     grid-template-columns: 1fr;
   }
 }

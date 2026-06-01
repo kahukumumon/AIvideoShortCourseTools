@@ -61,10 +61,15 @@ const videoMosaicState = {
   items: [],
   selectedId: null,
   guide: true,
-  mask: {
-    circleA: { cx: 0.38, cy: 0.48, r: 0.075 },
-    circleB: { cx: 0.62, cy: 0.48, r: 0.075 },
-  },
+  pairs: [
+    {
+      id: "pair-1",
+      name: "A-B 1",
+      circleA: { cx: 0.38, cy: 0.48, r: 0.075 },
+      circleB: { cx: 0.62, cy: 0.48, r: 0.075 },
+    },
+  ],
+  selectedPairId: "pair-1",
   drag: null,
   frameRequest: null,
   previewToken: 0,
@@ -2429,19 +2434,83 @@ function getVideoMosaicPoint(event) {
   };
 }
 
-function cloneVideoMosaicMask(mask = videoMosaicState.mask) {
+function createVideoMosaicPair(index = videoMosaicState.pairs.length) {
+  const offset = ((index % 5) - 2) * 0.045;
   return {
+    id: crypto.randomUUID(),
+    name: `A-B ${index + 1}`,
+    circleA: { cx: clamp(0.38 + offset, 0.08, 0.92), cy: 0.48, r: 0.075 },
+    circleB: { cx: clamp(0.62 + offset, 0.08, 0.92), cy: 0.48, r: 0.075 },
+  };
+}
+
+function getVideoMosaicPairs() {
+  if (!Array.isArray(videoMosaicState.pairs) || videoMosaicState.pairs.length === 0) {
+    videoMosaicState.pairs = [createVideoMosaicPair(0)];
+    videoMosaicState.selectedPairId = videoMosaicState.pairs[0].id;
+  }
+  return videoMosaicState.pairs;
+}
+
+function getVideoMosaicSelectedPair() {
+  const pairs = getVideoMosaicPairs();
+  return pairs.find((pair) => pair.id === videoMosaicState.selectedPairId) || pairs[0];
+}
+
+function cloneVideoMosaicMask(mask = getVideoMosaicSelectedPair()) {
+  return {
+    id: mask.id,
+    name: mask.name,
     circleA: { ...mask.circleA },
     circleB: { ...mask.circleB },
   };
 }
 
 function resetVideoMosaicMask() {
-  videoMosaicState.mask = {
-    circleA: { cx: 0.38, cy: 0.48, r: 0.075 },
-    circleB: { cx: 0.62, cy: 0.48, r: 0.075 },
-  };
+  const selected = getVideoMosaicSelectedPair();
+  selected.circleA = { cx: 0.38, cy: 0.48, r: 0.075 };
+  selected.circleB = { cx: 0.62, cy: 0.48, r: 0.075 };
   drawVideoMosaicFrame();
+}
+
+function addVideoMosaicPair() {
+  const pair = createVideoMosaicPair(getVideoMosaicPairs().length);
+  videoMosaicState.pairs.push(pair);
+  videoMosaicState.selectedPairId = pair.id;
+  renderVideoMosaicPairControls();
+  drawVideoMosaicFrame();
+}
+
+function deleteVideoMosaicPair() {
+  const pairs = getVideoMosaicPairs();
+  if (pairs.length <= 1) return;
+  const selectedId = getVideoMosaicSelectedPair().id;
+  const index = pairs.findIndex((pair) => pair.id === selectedId);
+  if (index < 0) return;
+  pairs.splice(index, 1);
+  pairs.forEach((pair, pairIndex) => {
+    pair.name = `A-B ${pairIndex + 1}`;
+  });
+  videoMosaicState.selectedPairId = pairs[Math.max(0, index - 1)]?.id || pairs[0].id;
+  renderVideoMosaicPairControls();
+  drawVideoMosaicFrame();
+}
+
+function renderVideoMosaicPairControls() {
+  if (!videoMosaicEls?.pairSelect) return;
+  const pairs = getVideoMosaicPairs();
+  videoMosaicEls.pairSelect.innerHTML = "";
+  pairs.forEach((pair, index) => {
+    pair.name = `A-B ${index + 1}`;
+    const option = document.createElement("option");
+    option.value = pair.id;
+    option.textContent = pair.name;
+    option.selected = pair.id === getVideoMosaicSelectedPair().id;
+    videoMosaicEls.pairSelect.append(option);
+  });
+  if (videoMosaicEls.deletePair) {
+    videoMosaicEls.deletePair.disabled = pairs.length <= 1;
+  }
 }
 
 function normalizeVideoMosaicCircle(circle) {
@@ -2465,7 +2534,7 @@ function getVideoMosaicDisplaySize(item) {
   };
 }
 
-function getVideoMosaicPixelCircles(width, height, mask = videoMosaicState.mask) {
+function getVideoMosaicPixelCircles(width, height, mask = getVideoMosaicSelectedPair()) {
   const longest = Math.max(width, height);
   return {
     circleA: {
@@ -2481,7 +2550,7 @@ function getVideoMosaicPixelCircles(width, height, mask = videoMosaicState.mask)
   };
 }
 
-function buildVideoMosaicPath(context, width, height, mask = videoMosaicState.mask) {
+function buildVideoMosaicPath(context, width, height, mask = getVideoMosaicSelectedPair()) {
   const { circleA: a, circleB: b } = getVideoMosaicPixelCircles(width, height, mask);
   const dx = b.cx - a.cx;
   const dy = b.cy - a.cy;
@@ -2542,7 +2611,7 @@ function computeVideoMosaicOuterTangents(a, b) {
   });
 }
 
-function getVideoMosaicGeometry(width, height, mask = videoMosaicState.mask) {
+function getVideoMosaicGeometry(width, height, mask = getVideoMosaicSelectedPair()) {
   const circles = getVideoMosaicPixelCircles(width, height, mask);
   const pointA = {
     x: clamp(circles.circleA.cx, 0, width - 1),
@@ -2605,8 +2674,8 @@ function isPointInVideoMosaicGeometry(x, y, geometry) {
   ]);
 }
 
-function isPointInVideoMosaicMask(point, width, height) {
-  return isPointInVideoMosaicGeometry(point.x, point.y, getVideoMosaicGeometry(width, height));
+function isPointInVideoMosaicMask(point, width, height, pair = getVideoMosaicSelectedPair()) {
+  return isPointInVideoMosaicGeometry(point.x, point.y, getVideoMosaicGeometry(width, height, pair));
 }
 
 function hitVideoMosaicHandle(point) {
@@ -2614,19 +2683,28 @@ function hitVideoMosaicHandle(point) {
   if (!item) return null;
   const { width, height } = getVideoMosaicDisplaySize(item);
   const longest = Math.max(width, height);
-  const circles = getVideoMosaicPixelCircles(width, height);
-  for (const key of ["circleA", "circleB"]) {
-    const circle = circles[key];
-    const centerDistance = Math.hypot(point.x - circle.cx, point.y - circle.cy);
-    if (centerDistance <= 15) {
-      return { type: "move", key };
-    }
-    if (Math.abs(centerDistance - circle.r) <= Math.max(9, longest * 0.012)) {
-      return { type: "resize", key };
+  const selected = getVideoMosaicSelectedPair();
+  const orderedPairs = [
+    selected,
+    ...getVideoMosaicPairs().filter((pair) => pair.id !== selected.id).reverse(),
+  ];
+  for (const pair of orderedPairs) {
+    const circles = getVideoMosaicPixelCircles(width, height, pair);
+    for (const key of ["circleA", "circleB"]) {
+      const circle = circles[key];
+      const centerDistance = Math.hypot(point.x - circle.cx, point.y - circle.cy);
+      if (centerDistance <= 15) {
+        return { type: "move", key, pairId: pair.id };
+      }
+      if (Math.abs(centerDistance - circle.r) <= Math.max(9, longest * 0.012)) {
+        return { type: "resize", key, pairId: pair.id };
+      }
     }
   }
-  if (isPointInVideoMosaicMask(point, width, height)) {
-    return { type: "move-shape" };
+  for (const pair of orderedPairs) {
+    if (isPointInVideoMosaicMask(point, width, height, pair)) {
+      return { type: "move-shape", pairId: pair.id };
+    }
   }
   return null;
 }
@@ -2634,7 +2712,9 @@ function hitVideoMosaicHandle(point) {
 function drawVideoMosaicPixelArea(context, sourceCanvas, width, height) {
   const sourceCtx = sourceCanvas.getContext("2d", { willReadFrequently: true });
   const frame = sourceCtx.getImageData(0, 0, width, height);
-  applyVideoMosaicShapeToImageData(frame, getVideoMosaicGeometry(width, height), getVideoMosaicBlockSize(width, height));
+  for (const pair of getVideoMosaicPairs()) {
+    applyVideoMosaicShapeToImageData(frame, getVideoMosaicGeometry(width, height, pair), getVideoMosaicBlockSize(width, height));
+  }
   context.putImageData(frame, 0, 0);
 }
 
@@ -2703,33 +2783,41 @@ function applyVideoMosaicShapeToImageData(imageData, geometry, blockSize) {
 }
 
 function drawVideoMosaicGuide(context, width, height) {
-  const circles = getVideoMosaicPixelCircles(width, height);
   context.save();
-  context.strokeStyle = "#fff0a6";
-  context.lineWidth = 3;
   context.shadowColor = "rgba(0, 0, 0, 0.72)";
   context.shadowBlur = 8;
-  buildVideoMosaicPath(context, width, height);
-  context.stroke();
+  for (const pair of getVideoMosaicPairs()) {
+    const selected = pair.id === getVideoMosaicSelectedPair().id;
+    const circles = getVideoMosaicPixelCircles(width, height, pair);
+    context.strokeStyle = selected ? "#fff0a6" : "rgba(125, 211, 252, 0.82)";
+    context.lineWidth = selected ? 3 : 2;
+    buildVideoMosaicPath(context, width, height, pair);
+    context.stroke();
 
-  for (const circle of [circles.circleA, circles.circleB]) {
-    context.beginPath();
-    context.arc(circle.cx, circle.cy, circle.r, 0, Math.PI * 2);
-    context.strokeStyle = "rgba(255, 255, 255, 0.9)";
-    context.lineWidth = 2;
-    context.stroke();
-    context.beginPath();
-    context.arc(circle.cx, circle.cy, 7, 0, Math.PI * 2);
-    context.fillStyle = "#ffe45c";
-    context.strokeStyle = "#1f2631";
-    context.lineWidth = 1.5;
-    context.fill();
-    context.stroke();
-    context.beginPath();
-    context.arc(circle.cx + circle.r, circle.cy, 6, 0, Math.PI * 2);
-    context.fillStyle = "#f8faf7";
-    context.fill();
-    context.stroke();
+    for (const [label, circle] of [["A", circles.circleA], ["B", circles.circleB]]) {
+      context.beginPath();
+      context.arc(circle.cx, circle.cy, circle.r, 0, Math.PI * 2);
+      context.strokeStyle = selected ? "rgba(255, 255, 255, 0.9)" : "rgba(255, 255, 255, 0.62)";
+      context.lineWidth = 2;
+      context.stroke();
+      context.beginPath();
+      context.arc(circle.cx, circle.cy, 7, 0, Math.PI * 2);
+      context.fillStyle = selected ? "#ffe45c" : "#7dd3fc";
+      context.strokeStyle = "#1f2631";
+      context.lineWidth = 1.5;
+      context.fill();
+      context.stroke();
+      context.beginPath();
+      context.arc(circle.cx + circle.r, circle.cy, 6, 0, Math.PI * 2);
+      context.fillStyle = "#f8faf7";
+      context.fill();
+      context.stroke();
+      context.fillStyle = "#111827";
+      context.font = "11px Avenir Next, Hiragino Sans, Yu Gothic UI, sans-serif";
+      context.textAlign = "center";
+      context.textBaseline = "middle";
+      context.fillText(label, circle.cx, circle.cy);
+    }
   }
   context.restore();
 }
@@ -2776,7 +2864,7 @@ function drawVideoMosaicFrame() {
     drawVideoMosaicGuide(videoMosaicCtx, width, height);
   }
   videoMosaicEls.time.value = String(video.currentTime || 0);
-  videoMosaicEls.caption.textContent = `${item.file.name} / ${item.metadata.width}×${item.metadata.height} / モザイク ${getVideoMosaicBlockSize(item.metadata.width, item.metadata.height)}px`;
+  videoMosaicEls.caption.textContent = `${item.file.name} / ${item.metadata.width}×${item.metadata.height} / A-B ${getVideoMosaicPairs().length}ペア / モザイク ${getVideoMosaicBlockSize(item.metadata.width, item.metadata.height)}px`;
 }
 
 function scheduleVideoMosaicFrame() {
@@ -2930,20 +3018,22 @@ function updateVideoMosaicDrag(point) {
   const longest = Math.max(width, height);
   const dx = (point.x - drag.startPoint.x) / width;
   const dy = (point.y - drag.startPoint.y) / height;
+  const pair = getVideoMosaicPairs().find((candidate) => candidate.id === drag.pairId);
+  if (!pair) return;
 
   if (drag.type === "move-shape") {
-    videoMosaicState.mask.circleA = normalizeVideoMosaicCircle({
+    pair.circleA = normalizeVideoMosaicCircle({
       ...drag.origin.circleA,
       cx: drag.origin.circleA.cx + dx,
       cy: drag.origin.circleA.cy + dy,
     });
-    videoMosaicState.mask.circleB = normalizeVideoMosaicCircle({
+    pair.circleB = normalizeVideoMosaicCircle({
       ...drag.origin.circleB,
       cx: drag.origin.circleB.cx + dx,
       cy: drag.origin.circleB.cy + dy,
     });
   } else if (drag.type === "move") {
-    videoMosaicState.mask[drag.key] = normalizeVideoMosaicCircle({
+    pair[drag.key] = normalizeVideoMosaicCircle({
       ...drag.origin[drag.key],
       cx: drag.origin[drag.key].cx + dx,
       cy: drag.origin[drag.key].cy + dy,
@@ -2952,7 +3042,7 @@ function updateVideoMosaicDrag(point) {
     const circle = drag.origin[drag.key];
     const center = { x: circle.cx * width, y: circle.cy * height };
     const radius = Math.hypot(point.x - center.x, point.y - center.y) / longest;
-    videoMosaicState.mask[drag.key] = normalizeVideoMosaicCircle({ ...circle, r: radius });
+    pair[drag.key] = normalizeVideoMosaicCircle({ ...circle, r: radius });
   }
   drawVideoMosaicFrame();
 }
@@ -2975,8 +3065,10 @@ async function createVideoMosaicMaskBytes(width, height) {
   context.fillStyle = "#000";
   context.fillRect(0, 0, width, height);
   context.fillStyle = "#fff";
-  buildVideoMosaicPath(context, width, height);
-  context.fill();
+  for (const pair of getVideoMosaicPairs()) {
+    buildVideoMosaicPath(context, width, height, pair);
+    context.fill();
+  }
   return canvasToPngBytes(canvas);
 }
 
@@ -3223,11 +3315,13 @@ async function renderVideoMosaicWithWebCodecs(item, signal, onProgress) {
         throwIfAborted(signal);
         context.drawImage(frame, 0, 0, outputSize.width, outputSize.height);
         const imageData = context.getImageData(0, 0, outputSize.width, outputSize.height);
-        applyVideoMosaicShapeToImageData(
-          imageData,
-          getVideoMosaicGeometry(outputSize.width, outputSize.height),
-          getVideoMosaicBlockSize(outputSize.width, outputSize.height)
-        );
+        for (const pair of getVideoMosaicPairs()) {
+          applyVideoMosaicShapeToImageData(
+            imageData,
+            getVideoMosaicGeometry(outputSize.width, outputSize.height, pair),
+            getVideoMosaicBlockSize(outputSize.width, outputSize.height)
+          );
+        }
         context.putImageData(imageData, 0, 0);
 
         const timestamp = Number.isFinite(frame.timestamp) ? Math.max(0, Math.round(frame.timestamp)) : processed * frameDurationUs;
@@ -3335,6 +3429,9 @@ function initVideoMosaicTool() {
     play: document.getElementById("videoMosaicPlay"),
     time: document.getElementById("videoMosaicTime"),
     guide: document.getElementById("videoMosaicGuide"),
+    addPair: document.getElementById("videoMosaicAddPair"),
+    pairSelect: document.getElementById("videoMosaicPairSelect"),
+    deletePair: document.getElementById("videoMosaicDeletePair"),
     reset: document.getElementById("videoMosaicReset"),
     run: document.getElementById("videoMosaicRun"),
     cancel: document.getElementById("videoMosaicCancel"),
@@ -3364,10 +3461,12 @@ function initVideoMosaicTool() {
     const point = getVideoMosaicPoint(event);
     const hit = hitVideoMosaicHandle(point);
     if (!hit) return;
+    videoMosaicState.selectedPairId = hit.pairId;
+    renderVideoMosaicPairControls();
     videoMosaicState.drag = {
       ...hit,
       startPoint: point,
-      origin: cloneVideoMosaicMask(),
+      origin: cloneVideoMosaicMask(getVideoMosaicSelectedPair()),
     };
     videoMosaicEls.canvas.setPointerCapture(event.pointerId);
   });
@@ -3412,6 +3511,13 @@ function initVideoMosaicTool() {
     drawVideoMosaicFrame();
   });
 
+  videoMosaicEls.addPair.addEventListener("click", addVideoMosaicPair);
+  videoMosaicEls.pairSelect.addEventListener("change", () => {
+    videoMosaicState.selectedPairId = videoMosaicEls.pairSelect.value;
+    renderVideoMosaicPairControls();
+    drawVideoMosaicFrame();
+  });
+  videoMosaicEls.deletePair.addEventListener("click", deleteVideoMosaicPair);
   videoMosaicEls.reset.addEventListener("click", resetVideoMosaicMask);
   videoMosaicEls.cancel.addEventListener("click", () => {
     cancelCurrentTask("ユーザー操作で動画固定モザイクをキャンセルしました。");
@@ -3423,6 +3529,7 @@ function initVideoMosaicTool() {
     });
   });
 
+  renderVideoMosaicPairControls();
   drawVideoMosaicPlaceholder();
 }
 
