@@ -30,6 +30,14 @@ const concatState = {
   trimFrames: 0,
 };
 
+const audioMuxState = {
+  videoFile: null,
+  audioFile: null,
+  videoUrl: "",
+  audioUrl: "",
+  durationMode: "video",
+};
+
 const ugoiraState = {
   file: null,
   objectUrl: "",
@@ -174,6 +182,7 @@ const characterNegativeVideo = [
 const characterSettingsText = "Steps: 25, Sampler: Euler a, Schedule type: Automatic, CFG scale: 7, Seed: -1, Size: 768x1088, Model hash: bdb59bac77, Model: waiNSFWIllustrious_v140, Denoising strength: 0.37, ADetailer model: face_yolov8n.pt, ADetailer confidence: 0.3, ADetailer dilate erode: 4, ADetailer mask blur: 4, ADetailer denoising strength: 0.4, ADetailer inpaint only masked: True, ADetailer inpaint padding: 32, ADetailer version: 25.3.0, Hires Module 1: Use same choices, Hires CFG Scale: 5, Hires upscale: 1.5, Hires upscaler: R-ESRGAN 4x+, Version: f2.0.1v1.10.1-previous-669-gdfdcbab6, Module 1: sdxl_vae";
 
 let concatEls = null;
+let audioMuxEls = null;
 let ugoiraEls = null;
 let pixivEls = null;
 let pixivCtx = null;
@@ -966,6 +975,8 @@ async function ensureFFmpegModules() {
 function routeLog(message) {
   if (ffmpegState.activeTool === "concat") {
     appendLog(concatEls?.log, message);
+  } else if (ffmpegState.activeTool === "audioMux") {
+    appendLog(audioMuxEls?.log, message);
   } else if (ffmpegState.activeTool === "ugoira") {
     appendLog(ugoiraEls?.log, message);
   } else if (ffmpegState.activeTool === "videoMosaic") {
@@ -976,6 +987,8 @@ function routeLog(message) {
 function routeProgress(progress) {
   if (ffmpegState.activeTool === "concat") {
     setProgress(concatEls?.progress, progress);
+  } else if (ffmpegState.activeTool === "audioMux") {
+    setProgress(audioMuxEls?.progress, progress);
   } else if (ffmpegState.activeTool === "ugoira") {
     setProgress(ugoiraEls?.progress, progress);
   } else if (ffmpegState.activeTool === "videoMosaic") {
@@ -1054,12 +1067,14 @@ function cancelCurrentTask(message) {
     ffmpegState.instance.terminate();
   }
   resetFFmpegState();
-  disableButtons(true, concatEls?.cancel, ugoiraEls?.cancel, videoMosaicEls?.cancel);
-  disableButtons(false, concatEls?.run, ugoiraEls?.run, videoMosaicEls?.run);
+  disableButtons(true, concatEls?.cancel, audioMuxEls?.cancel, ugoiraEls?.cancel, videoMosaicEls?.cancel);
+  disableButtons(false, concatEls?.run, audioMuxEls?.run, ugoiraEls?.run, videoMosaicEls?.run);
   setStatus(concatEls?.status, "現在の処理をキャンセルしました。必要ならそのまま再実行できます。", "default");
+  setStatus(audioMuxEls?.status, "現在の処理をキャンセルしました。必要ならそのまま再実行できます。", "default");
   setStatus(ugoiraEls?.status, "現在の処理をキャンセルしました。必要ならそのまま再実行できます。", "default");
   setStatus(videoMosaicEls?.status, "現在の処理をキャンセルしました。必要ならそのまま再実行できます。", "default");
   setProgress(concatEls?.progress, 0);
+  setProgress(audioMuxEls?.progress, 0);
   setProgress(ugoiraEls?.progress, 0);
   setProgress(videoMosaicEls?.progress, 0);
 }
@@ -1076,6 +1091,11 @@ async function withFFmpegTask(tool, runner) {
     disableButtons(true, concatEls?.run);
     disableButtons(false, concatEls?.cancel);
     setProgress(concatEls?.progress, 0);
+  }
+  if (tool === "audioMux") {
+    disableButtons(true, audioMuxEls?.run);
+    disableButtons(false, audioMuxEls?.cancel);
+    setProgress(audioMuxEls?.progress, 0);
   }
   if (tool === "ugoira") {
     disableButtons(true, ugoiraEls?.run);
@@ -1103,6 +1123,10 @@ async function withFFmpegTask(tool, runner) {
     if (tool === "concat") {
       disableButtons(false, concatEls?.run);
       disableButtons(true, concatEls?.cancel);
+    }
+    if (tool === "audioMux") {
+      disableButtons(false, audioMuxEls?.run);
+      disableButtons(true, audioMuxEls?.cancel);
     }
     if (tool === "ugoira") {
       disableButtons(false, ugoiraEls?.run);
@@ -1168,6 +1192,152 @@ async function removeFiles(ffmpeg, files) {
       await ffmpeg.deleteFile(file);
     } catch (_) {
     }
+  }
+}
+
+function resetAudioMuxObjectUrl(kind) {
+  const key = `${kind}Url`;
+  if (audioMuxState[key]) {
+    URL.revokeObjectURL(audioMuxState[key]);
+    audioMuxState[key] = "";
+  }
+}
+
+function setAudioMuxFile(kind, files) {
+  const file = files.find((item) => item instanceof File);
+  if (!file) return;
+  resetAudioMuxObjectUrl(kind);
+  audioMuxState[`${kind}File`] = file;
+  audioMuxState[`${kind}Url`] = URL.createObjectURL(file);
+  if (kind === "video" && audioMuxEls?.videoPreview) {
+    audioMuxEls.videoPreview.src = audioMuxState.videoUrl;
+    audioMuxEls.videoPreview.hidden = false;
+  }
+  if (kind === "audio" && audioMuxEls?.audioPreview) {
+    audioMuxEls.audioPreview.src = audioMuxState.audioUrl;
+    audioMuxEls.audioPreview.hidden = false;
+  }
+  renderAudioMuxState();
+  appendLog(audioMuxEls?.log, `${kind === "video" ? "動画" : "音声"}を選択: ${file.name} / ${formatBytes(file.size)}`);
+}
+
+function renderAudioMuxState() {
+  if (!audioMuxEls) return;
+  audioMuxEls.videoName.textContent = audioMuxState.videoFile
+    ? `${audioMuxState.videoFile.name} / ${formatBytes(audioMuxState.videoFile.size)}`
+    : "未選択";
+  audioMuxEls.audioName.textContent = audioMuxState.audioFile
+    ? `${audioMuxState.audioFile.name} / ${formatBytes(audioMuxState.audioFile.size)}`
+    : "未選択";
+  const ready = audioMuxState.videoFile && audioMuxState.audioFile;
+  setStatus(
+    audioMuxEls.status,
+    ready ? "動画と音声を結合できます。" : "動画1本と音声1本を選択してください。",
+    "default"
+  );
+}
+
+function getLoadedMediaDuration(element, file, objectUrl) {
+  return new Promise((resolve, reject) => {
+    if (!file) {
+      reject(new Error("素材が選択されていません。"));
+      return;
+    }
+    const media = element || document.createElement(file.type.startsWith("audio/") ? "audio" : "video");
+    const cleanup = () => {
+      media.removeEventListener("loadedmetadata", onLoaded);
+      media.removeEventListener("error", onError);
+    };
+    const onLoaded = () => {
+      cleanup();
+      resolve(Number.isFinite(media.duration) ? media.duration : 0);
+    };
+    const onError = () => {
+      cleanup();
+      reject(new Error(`${file.name} の長さを取得できませんでした。`));
+    };
+    media.addEventListener("loadedmetadata", onLoaded, { once: true });
+    media.addEventListener("error", onError, { once: true });
+    if (media.readyState >= 1 && Number.isFinite(media.duration)) {
+      cleanup();
+      resolve(media.duration);
+      return;
+    }
+    if (!media.src) media.src = objectUrl;
+    media.load();
+  });
+}
+
+async function buildAudioMuxArgs(videoName, audioName, outputName) {
+  const args = [
+    "-i", videoName,
+    "-i", audioName,
+    "-map", "0:v:0",
+    "-map", "1:a:0",
+    "-c:v", "copy",
+    "-c:a", "aac",
+    "-movflags", "+faststart",
+  ];
+  const mode = audioMuxEls?.durationMode?.value || "video";
+  audioMuxState.durationMode = mode;
+  if (mode === "video") {
+    const duration = await getLoadedMediaDuration(
+      audioMuxEls?.videoPreview,
+      audioMuxState.videoFile,
+      audioMuxState.videoUrl
+    );
+    if (duration > 0) {
+      args.push("-t", duration.toFixed(3));
+      appendLog(audioMuxEls?.log, `出力長: 動画基準 ${formatSeconds(duration)}`);
+    }
+  } else if (mode === "shortest") {
+    args.push("-shortest");
+    appendLog(audioMuxEls?.log, "出力長: 短い素材に合わせます。");
+  } else {
+    appendLog(audioMuxEls?.log, "出力長: ffmpeg の既定に任せます。");
+  }
+  args.push(outputName);
+  return args;
+}
+
+async function runAudioMux() {
+  if (!audioMuxState.videoFile || !audioMuxState.audioFile) {
+    setStatus(audioMuxEls.status, "動画1本と音声1本を選択してください。", "error");
+    return;
+  }
+  appendLog(audioMuxEls.log, "動画と音声の結合を開始します。");
+  setStatus(audioMuxEls.status, "ffmpeg で結合中です。ブラウザを閉じずに待ってください。", "default");
+  try {
+    await withFFmpegTask("audioMux", async (ffmpeg) => {
+      const videoExt = splitName(audioMuxState.videoFile.name).ext || ".mp4";
+      const audioExt = splitName(audioMuxState.audioFile.name).ext || ".m4a";
+      const inputVideoName = `audio_mux_video${videoExt}`;
+      const inputAudioName = `audio_mux_audio${audioExt}`;
+      const outputName = `${sanitizeBaseName(audioMuxState.videoFile.name)}-audio.mp4`;
+      const createdFiles = [inputVideoName, inputAudioName, outputName];
+      try {
+        appendLog(audioMuxEls.log, "入力ファイルをffmpegへ渡します。");
+        await ffmpeg.writeFile(inputVideoName, await ffmpegModules.fetchFile(audioMuxState.videoFile));
+        await ffmpeg.writeFile(inputAudioName, await ffmpegModules.fetchFile(audioMuxState.audioFile));
+        const ffmpegArgs = await buildAudioMuxArgs(inputVideoName, inputAudioName, outputName);
+        appendLog(audioMuxEls.log, "映像は再エンコードせず、音声をAACで結合します。");
+        const exitCode = await ffmpeg.exec(ffmpegArgs);
+        if (exitCode !== 0) {
+          throw new Error(`ffmpeg が終了コード ${exitCode} を返しました。`);
+        }
+        const data = await ffmpeg.readFile(outputName);
+        const outputBlob = new Blob([data], { type: "video/mp4" });
+        appendLog(audioMuxEls.log, `ffmpeg 出力サイズ: ${formatBytes(outputBlob.size)}`);
+        downloadBlob(outputBlob, outputName, audioMuxEls.log);
+        setStatus(audioMuxEls.status, `${outputName} をダウンロードしました。`, "success");
+        appendLog(audioMuxEls.log, `出力完了: ${outputName}`);
+      } finally {
+        await removeFiles(ffmpeg, createdFiles);
+      }
+    });
+  } catch (error) {
+    if (/terminated|abort/i.test(String(error?.message || ""))) return;
+    setStatus(audioMuxEls.status, `結合に失敗しました。${error.message || error}`, "error");
   }
 }
 
@@ -3686,6 +3856,62 @@ function initConcatTool() {
   renderConcatList();
 }
 
+function initAudioMuxTool() {
+  const videoInput = document.getElementById("audioMuxVideoInput");
+  if (!videoInput) return;
+
+  audioMuxEls = {
+    videoInput,
+    audioInput: document.getElementById("audioMuxAudioInput"),
+    videoDrop: document.getElementById("audioMuxVideoDrop"),
+    audioDrop: document.getElementById("audioMuxAudioDrop"),
+    videoName: document.getElementById("audioMuxVideoName"),
+    audioName: document.getElementById("audioMuxAudioName"),
+    videoPreview: document.getElementById("audioMuxVideoPreview"),
+    audioPreview: document.getElementById("audioMuxAudioPreview"),
+    durationMode: document.getElementById("audioMuxDurationMode"),
+    run: document.getElementById("audioMuxRun"),
+    clear: document.getElementById("audioMuxClear"),
+    cancel: document.getElementById("audioMuxCancel"),
+    progress: document.getElementById("audioMuxProgress"),
+    status: document.getElementById("audioMuxStatus"),
+    log: document.getElementById("audioMuxLog"),
+  };
+
+  setupDropzone(audioMuxEls.videoDrop, audioMuxEls.videoInput, (files) => {
+    setAudioMuxFile("video", files.filter((file) => file.type.startsWith("video/")));
+  });
+  setupDropzone(audioMuxEls.audioDrop, audioMuxEls.audioInput, (files) => {
+    setAudioMuxFile("audio", files.filter((file) => file.type.startsWith("audio/")));
+  });
+
+  audioMuxEls.durationMode?.addEventListener("change", () => {
+    audioMuxState.durationMode = audioMuxEls.durationMode.value;
+    appendLog(audioMuxEls.log, `出力長設定: ${audioMuxEls.durationMode.selectedOptions[0]?.textContent || audioMuxState.durationMode}`);
+  });
+  audioMuxEls.run.addEventListener("click", () => {
+    runAudioMux();
+  });
+  audioMuxEls.cancel.addEventListener("click", () => {
+    cancelCurrentTask("ユーザー操作で動画音声結合をキャンセルしました。");
+  });
+  audioMuxEls.clear.addEventListener("click", () => {
+    resetAudioMuxObjectUrl("video");
+    resetAudioMuxObjectUrl("audio");
+    audioMuxState.videoFile = null;
+    audioMuxState.audioFile = null;
+    audioMuxEls.videoPreview.removeAttribute("src");
+    audioMuxEls.audioPreview.removeAttribute("src");
+    audioMuxEls.videoPreview.hidden = true;
+    audioMuxEls.audioPreview.hidden = true;
+    setProgress(audioMuxEls.progress, 0);
+    renderAudioMuxState();
+    appendLog(audioMuxEls.log, "選択をクリアしました。");
+  });
+
+  renderAudioMuxState();
+}
+
 function initUgoiraTool() {
   const input = document.getElementById("ugoiraInput");
   if (!input) return;
@@ -4154,6 +4380,7 @@ function initProtocolWarning() {
 
 initProtocolWarning();
 initConcatTool();
+initAudioMuxTool();
 initUgoiraTool();
 initPixivTool();
 initMosaicTool();

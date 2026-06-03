@@ -46,6 +46,12 @@
   --brand-soft: rgba(191, 85, 39, 0.1);
 }
 
+.tool-card-audio-mux {
+  --brand: #4f6f3e;
+  --brand-deep: #2d4b21;
+  --brand-soft: rgba(79, 111, 62, 0.12);
+}
+
 .tool-card-ugoira {
   --brand: #b54d2d;
   --brand-deep: #89331a;

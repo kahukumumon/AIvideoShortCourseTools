@@ -1,0 +1,51 @@
+:root {
+  --brand: #4f6f3e;
+  --brand-deep: #2d4b21;
+  --brand-soft: rgba(79, 111, 62, 0.12);
+}
+
+.audio-mux-grid {
+  grid-template-columns: 1.15fr 0.85fr;
+}
+
+.audio-mux-drop-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.audio-mux-dropzone {
+  min-height: 132px;
+}
+
+.audio-mux-files {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.audio-mux-files span {
+  font-family: var(--mono);
+  word-break: break-word;
+}
+
+.audio-mux-duration {
+  margin-top: 14px;
+}
+
+.audio-mux-preview {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.audio-mux-preview audio {
+  width: 100%;
+}
+
+@media (max-width: 980px) {
+  .audio-mux-grid,
+  .audio-mux-drop-grid {
+    grid-template-columns: 1fr;
+  }
+}

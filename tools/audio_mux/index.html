@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>動画音声結合 | AI動画短期講座ツール</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="../../assets/css/base.css">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <main class="page">
+    <div class="topbar">
+      <a class="topbar-link" href="../..">一覧へ戻る</a>
+      <nav class="topbar-nav" aria-label="ツール移動">
+        <a class="topbar-link" href="../concat">動画連結</a>
+        <a class="topbar-link" href="../video_edit">動画編集</a>
+        <a class="topbar-link" href="../video_mosaic">動画固定モザイク</a>
+        <a class="topbar-link" href="../ugoira">うごイラ</a>
+        <a class="topbar-link" href="../pixiv">pixivリサイズ</a>
+        <a class="topbar-link" href="../mosaic">画像モザイク</a>
+      </nav>
+    </div>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <span class="eyebrow">AUDIO MUX</span>
+          <h1>動画音声結合</h1>
+          <p>
+            動画 1 本と音声 1 本を選び、映像はそのままコピーして mp4 にまとめます。
+            音声は再生互換性を優先して AAC に変換します。
+          </p>
+        </div>
+        <p class="hint">編集なしで結合だけ実行します。進行状況とffmpegログは右側に残ります。</p>
+      </div>
+
+      <div class="warning" id="protocolWarning" hidden>
+        <code>file://</code> で開くと CDN や ffmpeg 読み込みに制限が出る場合があります。必要ならローカルサーバー経由で開いてください。
+      </div>
+
+      <div class="grid audio-mux-grid">
+        <div class="subpanel">
+          <h3>素材選択</h3>
+          <div class="audio-mux-drop-grid">
+            <label class="dropzone audio-mux-dropzone" id="audioMuxVideoDrop">
+              <input id="audioMuxVideoInput" type="file" accept="video/*">
+              <span>
+                <strong>動画を追加</strong>
+                ドラッグ＆ドロップ / クリック選択
+              </span>
+            </label>
+            <label class="dropzone audio-mux-dropzone" id="audioMuxAudioDrop">
+              <input id="audioMuxAudioInput" type="file" accept="audio/*">
+              <span>
+                <strong>音声を追加</strong>
+                wav / mp3 / m4a など
+              </span>
+            </label>
+          </div>
+
+          <div class="audio-mux-files">
+            <div class="status-card">
+              <div class="status-text">動画: <span id="audioMuxVideoName">未選択</span></div>
+            </div>
+            <div class="status-card">
+              <div class="status-text">音声: <span id="audioMuxAudioName">未選択</span></div>
+            </div>
+          </div>
+
+          <label class="field audio-mux-duration">
+            <span>出力の長さ</span>
+            <select id="audioMuxDurationMode">
+              <option value="video" selected>動画の長さに合わせる</option>
+              <option value="shortest">短い素材に合わせる</option>
+              <option value="default">ffmpegの既定に任せる</option>
+            </select>
+          </label>
+
+          <div class="controls">
+            <button class="primary" id="audioMuxRun" type="button">結合してダウンロード</button>
+            <button class="secondary" id="audioMuxClear" type="button">選択をクリア</button>
+            <button class="danger" id="audioMuxCancel" type="button" disabled>処理をキャンセル</button>
+          </div>
+
+          <div class="progress-shell" aria-hidden="true">
+            <div class="progress-bar" id="audioMuxProgress"></div>
+          </div>
+          <div class="status-row">
+            <div class="status-card" id="audioMuxStatus">
+              <div class="status-text">動画1本と音声1本を選択してください。</div>
+            </div>
+          </div>
+
+          <div class="audio-mux-preview">
+            <video id="audioMuxVideoPreview" controls preload="metadata" playsinline hidden></video>
+            <audio id="audioMuxAudioPreview" controls preload="metadata" hidden></audio>
+          </div>
+        </div>
+
+        <div class="subpanel">
+          <h3>処理ログ</h3>
+          <div class="log" id="audioMuxLog">動画音声結合ログ待機中</div>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script src="../../assets/js/app.js"></script>
+</body>
+</html>
