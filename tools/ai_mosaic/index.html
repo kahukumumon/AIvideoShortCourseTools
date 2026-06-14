@@ -1,0 +1,772 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI画像モザイク | AI動画短期講座ツール</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="../../assets/css/base.css">
+  <style>
+    :root {
+      --brand: #2f7569;
+      --brand-deep: #1d5148;
+      --brand-soft: rgba(47, 117, 105, 0.12);
+      --danger: #b54d2d;
+    }
+
+    .ai-grid {
+      display: grid;
+      grid-template-columns: minmax(280px, 0.78fr) minmax(0, 1.42fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    .dropzone input {
+      display: none;
+    }
+
+    .model-row,
+    .range-row,
+    .status-grid {
+      display: grid;
+      gap: 10px;
+    }
+
+    .model-row {
+      grid-template-columns: 1fr;
+    }
+
+    .model-row input,
+    .range-row input[type="range"] {
+      width: 100%;
+    }
+
+    .model-row input {
+      box-sizing: border-box;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px 12px;
+      color: var(--text);
+      background: #fff;
+      font: inherit;
+    }
+
+    .setting-label {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .status-log {
+      min-height: 92px;
+      max-height: 180px;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px 12px;
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.66);
+      font-family: var(--mono);
+      font-size: 0.82rem;
+      line-height: 1.55;
+      white-space: pre-wrap;
+    }
+
+    .preview-wrap {
+      display: grid;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .canvas-shell {
+      display: grid;
+      place-items: center;
+      min-height: 360px;
+      overflow: auto;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background:
+        linear-gradient(45deg, rgba(30, 40, 45, 0.06) 25%, transparent 25%),
+        linear-gradient(-45deg, rgba(30, 40, 45, 0.06) 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, rgba(30, 40, 45, 0.06) 75%),
+        linear-gradient(-45deg, transparent 75%, rgba(30, 40, 45, 0.06) 75%);
+      background-position: 0 0, 0 12px, 12px -12px, -12px 0;
+      background-size: 24px 24px;
+    }
+
+    #previewCanvas {
+      display: block;
+      max-width: 100%;
+      height: auto;
+      background: #f6f4ef;
+    }
+
+    .badge-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .badge {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 5px 9px;
+      color: var(--brand-deep);
+      background: var(--brand-soft);
+      font-size: 0.82rem;
+    }
+
+    button.badge {
+      cursor: pointer;
+      font: inherit;
+      transition: background 160ms ease, color 160ms ease, border-color 160ms ease, opacity 160ms ease;
+    }
+
+    button.badge[aria-pressed="false"] {
+      border-color: rgba(95, 104, 111, 0.36);
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.7);
+      opacity: 0.58;
+      text-decoration: line-through;
+    }
+
+    button.badge:hover {
+      border-color: var(--brand);
+    }
+
+    .warning {
+      color: var(--danger);
+    }
+
+    @media (max-width: 980px) {
+      .ai-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <div class="topbar">
+      <a class="topbar-link" href="../..">一覧へ戻る</a>
+      <nav class="topbar-nav" aria-label="ツール移動">
+        <a class="topbar-link" href="../mosaic">画像モザイク</a>
+        <a class="topbar-link" href="../metadata">メタデータ削除</a>
+        <a class="topbar-link" href="../pixiv">pixivリサイズ</a>
+        <a class="topbar-link" href="../video_mosaic">動画固定モザイク</a>
+      </nav>
+    </div>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <span class="eyebrow">AI IMAGE MOSAIC</span>
+          <h1>AI画像モザイク</h1>
+          <p>画像内の検出領域へプレビュー上でモザイクと半透明オーバーレイを重ね、元画像サイズで書き出します。</p>
+        </div>
+        <p class="hint">書き出し時のモザイク粒度は元画像長辺の 1/100 です。</p>
+      </div>
+
+      <div class="ai-grid">
+        <div class="subpanel">
+          <h3>入力</h3>
+          <label class="dropzone" id="dropzone">
+            <input id="fileInput" type="file" accept="image/*">
+            <span>
+              <strong>画像をドロップ</strong>
+              PNG / JPEG / WebP など
+            </span>
+          </label>
+
+          <div class="controls">
+            <button class="primary" id="runButton" type="button" disabled>検出</button>
+            <button class="secondary" id="exportButton" type="button" disabled>エクスポート</button>
+          </div>
+
+          <div class="range-row">
+            <label class="setting-label" for="scoreRange">
+              <span>検出しきい値</span>
+              <strong id="scoreLabel">0.30</strong>
+            </label>
+            <input id="scoreRange" type="range" min="0.05" max="0.9" step="0.01" value="0.30">
+          </div>
+
+          <div class="range-row">
+            <label class="setting-label" for="maskRange">
+              <span>マスクしきい値</span>
+              <strong id="maskLabel">0.50</strong>
+            </label>
+            <input id="maskRange" type="range" min="0.05" max="0.9" step="0.01" value="0.50">
+          </div>
+
+          <div class="model-row">
+            <label class="setting-label" for="modelUrl">
+              <span>ONNXモデルURL</span>
+            </label>
+            <input id="modelUrl" type="url" value="https://huggingface.co/01miku/anime-nsfw-segm-yolo26/resolve/main/nsfw-anime-nano-x640.onnx?download=true">
+          </div>
+
+          <div class="status-grid">
+            <div class="status-card" id="summary">画像を選択してください。</div>
+            <div class="status-log" id="log" aria-live="polite">待機中</div>
+          </div>
+        </div>
+
+        <div class="subpanel preview-wrap">
+          <h3>プレビュー</h3>
+          <div class="canvas-shell">
+            <canvas id="previewCanvas" width="960" height="540"></canvas>
+          </div>
+          <div class="badge-list" id="detections"></div>
+          <p class="caption">赤の半透明部分がAI検出マスクです。プレビューは書き出しと同じモザイク比率で表示します。</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.webgpu.min.js"></script>
+  <script>
+    const inputSize = 640;
+    const classNames = ["anus", "nipple", "penis", "vagina", "female face", "male face", "pubic hair"];
+    const state = {
+      image: null,
+      fileName: "image",
+      session: null,
+      modelUrl: "",
+      provider: "",
+      forceWasm: false,
+      letterbox: null,
+      detectionOutput: null,
+      maskCanvas: null,
+      maskOutput: null,
+      detections: [],
+      disabledLabels: new Set(),
+      preview: { width: 960, height: 540 }
+    };
+
+    const fileInput = document.getElementById("fileInput");
+    const dropzone = document.getElementById("dropzone");
+    const runButton = document.getElementById("runButton");
+    const exportButton = document.getElementById("exportButton");
+    const scoreRange = document.getElementById("scoreRange");
+    const maskRange = document.getElementById("maskRange");
+    const scoreLabel = document.getElementById("scoreLabel");
+    const maskLabel = document.getElementById("maskLabel");
+    const modelUrl = document.getElementById("modelUrl");
+    const summary = document.getElementById("summary");
+    const logEl = document.getElementById("log");
+    const detectionsEl = document.getElementById("detections");
+    const previewCanvas = document.getElementById("previewCanvas");
+    const previewCtx = previewCanvas.getContext("2d");
+
+    function log(message) {
+      const time = new Date().toLocaleTimeString();
+      logEl.textContent += `\n[${time}] ${message}`;
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function setBusy(isBusy) {
+      runButton.disabled = isBusy || !state.image;
+      exportButton.disabled = isBusy || !state.image || !state.maskCanvas || getActiveDetections().length === 0;
+      runButton.textContent = isBusy ? "処理中" : "検出";
+    }
+
+    function sigmoid(value) {
+      return 1 / (1 + Math.exp(-value));
+    }
+
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    function sanitizeFileBase(name) {
+      return name.replace(/\.[^.]+$/, "").replace(/[\\/:*?"<>|]+/g, "_") || "image";
+    }
+
+    function createCanvas(width, height) {
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      return canvas;
+    }
+
+    function calculatePreviewSize(width, height) {
+      const maxWidth = 980;
+      const maxHeight = 700;
+      const scale = Math.min(1, maxWidth / width, maxHeight / height);
+      return {
+        width: Math.max(1, Math.round(width * scale)),
+        height: Math.max(1, Math.round(height * scale))
+      };
+    }
+
+    async function decodeImage(file) {
+      const url = URL.createObjectURL(file);
+      try {
+        const image = new Image();
+        image.src = url;
+        await image.decode();
+        return image;
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    }
+
+    function renderBasePreview() {
+      if (!state.image) {
+        previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+        return;
+      }
+      const size = calculatePreviewSize(state.image.naturalWidth, state.image.naturalHeight);
+      state.preview = size;
+      previewCanvas.width = size.width;
+      previewCanvas.height = size.height;
+      previewCtx.clearRect(0, 0, size.width, size.height);
+      previewCtx.drawImage(state.image, 0, 0, size.width, size.height);
+    }
+
+    function drawMaskToCanvas(target, width, height) {
+      if (!state.maskCanvas || !state.letterbox) return null;
+      const mask = createCanvas(width, height);
+      const ctx = mask.getContext("2d");
+      const lb = state.letterbox;
+      ctx.drawImage(
+        state.maskCanvas,
+        lb.padX,
+        lb.padY,
+        lb.drawWidth,
+        lb.drawHeight,
+        0,
+        0,
+        width,
+        height
+      );
+      if (target) {
+        target.drawImage(mask, 0, 0);
+      }
+      return mask;
+    }
+
+    function drawMosaic(ctx, width, height, blockSize, maskCanvas) {
+      const smallWidth = Math.max(1, Math.ceil(width / blockSize));
+      const smallHeight = Math.max(1, Math.ceil(height / blockSize));
+      const source = createCanvas(width, height);
+      const sourceCtx = source.getContext("2d");
+      sourceCtx.drawImage(state.image, 0, 0, width, height);
+
+      const small = createCanvas(smallWidth, smallHeight);
+      const smallCtx = small.getContext("2d");
+      smallCtx.imageSmoothingEnabled = true;
+      smallCtx.drawImage(source, 0, 0, smallWidth, smallHeight);
+
+      const mosaic = createCanvas(width, height);
+      const mosaicCtx = mosaic.getContext("2d");
+      mosaicCtx.imageSmoothingEnabled = false;
+      mosaicCtx.drawImage(small, 0, 0, smallWidth, smallHeight, 0, 0, width, height);
+      mosaicCtx.globalCompositeOperation = "destination-in";
+      mosaicCtx.drawImage(maskCanvas, 0, 0);
+      mosaicCtx.globalCompositeOperation = "source-over";
+
+      ctx.drawImage(mosaic, 0, 0);
+    }
+
+    function renderPreview() {
+      rebuildActiveMask();
+      renderBasePreview();
+      if (!state.maskCanvas || getActiveDetections().length === 0) {
+        renderDetectionBadges();
+        return;
+      }
+      const { width, height } = state.preview;
+      const mask = drawMaskToCanvas(null, width, height);
+      const previewBlock = Math.max(1, Math.round(Math.max(width, height) / 100));
+      drawMosaic(previewCtx, width, height, previewBlock, mask);
+
+      const overlay = createCanvas(width, height);
+      const overlayCtx = overlay.getContext("2d");
+      overlayCtx.fillStyle = "rgba(220, 45, 35, 0.34)";
+      overlayCtx.fillRect(0, 0, width, height);
+      overlayCtx.globalCompositeOperation = "destination-in";
+      overlayCtx.drawImage(mask, 0, 0);
+      previewCtx.drawImage(overlay, 0, 0);
+      renderDetectionBadges();
+    }
+
+    function renderDetectionBadges() {
+      detectionsEl.textContent = "";
+      if (!state.detections.length) {
+        const badge = document.createElement("span");
+        badge.className = "badge";
+        badge.textContent = state.maskCanvas ? "検出なし" : "未検出";
+        detectionsEl.appendChild(badge);
+        return;
+      }
+      const counts = new Map();
+      for (const detection of state.detections) {
+        counts.set(detection.label, (counts.get(detection.label) || 0) + 1);
+      }
+      for (const [label, count] of counts) {
+        const badge = document.createElement("button");
+        const enabled = !state.disabledLabels.has(label);
+        badge.className = "badge";
+        badge.type = "button";
+        badge.setAttribute("aria-pressed", enabled ? "true" : "false");
+        badge.textContent = `${label}: ${count}`;
+        badge.addEventListener("click", () => {
+          if (state.disabledLabels.has(label)) {
+            state.disabledLabels.delete(label);
+          } else {
+            state.disabledLabels.add(label);
+          }
+          renderPreview();
+          setBusy(false);
+        });
+        detectionsEl.appendChild(badge);
+      }
+    }
+
+    function getActiveDetections() {
+      return state.detections.filter((detection) => !state.disabledLabels.has(detection.label));
+    }
+
+    function rebuildActiveMask() {
+      if (!state.maskOutput) return;
+      const activeDetections = getActiveDetections();
+      state.maskCanvas = activeDetections.length
+        ? buildMaskCanvas(activeDetections, state.maskOutput, Number(maskRange.value))
+        : null;
+    }
+
+    function updateDetectionSummary() {
+      if (!state.image) return;
+      summary.innerHTML = state.detections.length
+        ? `${state.image.naturalWidth}×${state.image.naturalHeight}px / 検出 ${state.detections.length} 件`
+        : `${state.image.naturalWidth}×${state.image.naturalHeight}px / <span class="warning">検出なし</span>`;
+    }
+
+    function applyScoreThresholdFromCachedOutput() {
+      if (!state.detectionOutput || !state.maskOutput) return;
+      state.detections = decodeDetections(state.detectionOutput, Number(scoreRange.value));
+      updateDetectionSummary();
+      renderPreview();
+      setBusy(false);
+    }
+
+    function prepareInputTensor() {
+      const scale = Math.min(inputSize / state.image.naturalWidth, inputSize / state.image.naturalHeight);
+      const drawWidth = Math.round(state.image.naturalWidth * scale);
+      const drawHeight = Math.round(state.image.naturalHeight * scale);
+      const padX = Math.floor((inputSize - drawWidth) / 2);
+      const padY = Math.floor((inputSize - drawHeight) / 2);
+      state.letterbox = { scale, drawWidth, drawHeight, padX, padY };
+
+      const canvas = createCanvas(inputSize, inputSize);
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      ctx.fillStyle = "rgb(114, 114, 114)";
+      ctx.fillRect(0, 0, inputSize, inputSize);
+      ctx.drawImage(state.image, padX, padY, drawWidth, drawHeight);
+
+      const pixels = ctx.getImageData(0, 0, inputSize, inputSize).data;
+      const input = new Float32Array(1 * 3 * inputSize * inputSize);
+      const plane = inputSize * inputSize;
+      for (let i = 0; i < plane; i += 1) {
+        input[i] = pixels[i * 4] / 255;
+        input[plane + i] = pixels[i * 4 + 1] / 255;
+        input[plane * 2 + i] = pixels[i * 4 + 2] / 255;
+      }
+      return new ort.Tensor("float32", input, [1, 3, inputSize, inputSize]);
+    }
+
+    async function ensureSession() {
+      const url = modelUrl.value.trim();
+      const provider = state.forceWasm || !navigator.gpu ? "wasm" : "webgpu";
+      if (state.session && state.modelUrl === url && state.provider === provider) return state.session;
+      if (!window.ort) throw new Error("ONNX Runtime Webを読み込めませんでした。");
+
+      ort.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/";
+      const providers = provider === "webgpu" ? ["webgpu"] : ["wasm"];
+      log(`モデル読込: ${provider.toUpperCase()} / ${url}`);
+      state.session = await ort.InferenceSession.create(url, {
+        executionProviders: providers
+      });
+      state.modelUrl = url;
+      state.provider = provider;
+      log(`入力: ${state.session.inputNames.join(", ")} / 出力: ${state.session.outputNames.join(", ")}`);
+      return state.session;
+    }
+
+    async function runModel(session, tensor) {
+      const feeds = {};
+      feeds[session.inputNames[0]] = tensor;
+      return session.run(feeds);
+    }
+
+    function decodeDetections(output0, scoreThreshold) {
+      const dims = output0.dims;
+      const data = output0.data;
+      const channels = dims[1];
+      const anchors = dims[2];
+      const classCount = channels - 4 - 32;
+      const raw = [];
+      let maxBoxValue = 0;
+
+      for (let anchor = 0; anchor < anchors; anchor += 1) {
+        maxBoxValue = Math.max(
+          maxBoxValue,
+          Math.abs(data[anchor]),
+          Math.abs(data[anchors + anchor]),
+          Math.abs(data[anchors * 2 + anchor]),
+          Math.abs(data[anchors * 3 + anchor])
+        );
+      }
+      const normalizedBoxes = maxBoxValue <= 2;
+
+      for (let anchor = 0; anchor < anchors; anchor += 1) {
+        let bestScore = -Infinity;
+        let bestClass = 0;
+        for (let c = 0; c < classCount; c += 1) {
+          const score = data[(4 + c) * anchors + anchor];
+          if (score > bestScore) {
+            bestScore = score;
+            bestClass = c;
+          }
+        }
+        if (bestScore < scoreThreshold) continue;
+
+        const scale = normalizedBoxes ? inputSize : 1;
+        const cx = data[anchor] * scale;
+        const cy = data[anchors + anchor] * scale;
+        const w = data[anchors * 2 + anchor] * scale;
+        const h = data[anchors * 3 + anchor] * scale;
+        const x1 = clamp(cx - w / 2, 0, inputSize);
+        const y1 = clamp(cy - h / 2, 0, inputSize);
+        const x2 = clamp(cx + w / 2, 0, inputSize);
+        const y2 = clamp(cy + h / 2, 0, inputSize);
+        if (x2 <= x1 || y2 <= y1) continue;
+
+        const coeffs = new Float32Array(32);
+        const coeffStart = 4 + classCount;
+        for (let i = 0; i < 32; i += 1) {
+          coeffs[i] = data[(coeffStart + i) * anchors + anchor];
+        }
+        raw.push({
+          x1,
+          y1,
+          x2,
+          y2,
+          score: bestScore,
+          classIndex: bestClass,
+          label: classNames[bestClass] || `class ${bestClass}`,
+          coeffs
+        });
+      }
+      return nms(raw, 0.45).slice(0, 30);
+    }
+
+    function nms(detections, iouThreshold) {
+      const sorted = detections.slice().sort((a, b) => b.score - a.score);
+      const selected = [];
+      while (sorted.length) {
+        const current = sorted.shift();
+        selected.push(current);
+        for (let i = sorted.length - 1; i >= 0; i -= 1) {
+          if (current.classIndex === sorted[i].classIndex && iou(current, sorted[i]) > iouThreshold) {
+            sorted.splice(i, 1);
+          }
+        }
+      }
+      return selected;
+    }
+
+    function iou(a, b) {
+      const x1 = Math.max(a.x1, b.x1);
+      const y1 = Math.max(a.y1, b.y1);
+      const x2 = Math.min(a.x2, b.x2);
+      const y2 = Math.min(a.y2, b.y2);
+      const intersection = Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
+      const areaA = (a.x2 - a.x1) * (a.y2 - a.y1);
+      const areaB = (b.x2 - b.x1) * (b.y2 - b.y1);
+      return intersection / Math.max(1e-6, areaA + areaB - intersection);
+    }
+
+    function buildMaskCanvas(detections, output1, threshold) {
+      const proto = output1.data;
+      const protoHeight = output1.dims[2];
+      const protoWidth = output1.dims[3];
+      const maskSmall = createCanvas(protoWidth, protoHeight);
+      const ctx = maskSmall.getContext("2d", { willReadFrequently: true });
+      const imageData = ctx.createImageData(protoWidth, protoHeight);
+      const scaleX = protoWidth / inputSize;
+      const scaleY = protoHeight / inputSize;
+
+      for (const detection of detections) {
+        const minX = clamp(Math.floor(detection.x1 * scaleX), 0, protoWidth - 1);
+        const maxX = clamp(Math.ceil(detection.x2 * scaleX), 0, protoWidth);
+        const minY = clamp(Math.floor(detection.y1 * scaleY), 0, protoHeight - 1);
+        const maxY = clamp(Math.ceil(detection.y2 * scaleY), 0, protoHeight);
+
+        for (let y = minY; y < maxY; y += 1) {
+          for (let x = minX; x < maxX; x += 1) {
+            let value = 0;
+            const pixelIndex = y * protoWidth + x;
+            for (let k = 0; k < 32; k += 1) {
+              value += detection.coeffs[k] * proto[k * protoWidth * protoHeight + pixelIndex];
+            }
+            if (sigmoid(value) >= threshold) {
+              imageData.data[pixelIndex * 4] = 255;
+              imageData.data[pixelIndex * 4 + 1] = 255;
+              imageData.data[pixelIndex * 4 + 2] = 255;
+              imageData.data[pixelIndex * 4 + 3] = 255;
+            }
+          }
+        }
+      }
+      ctx.putImageData(imageData, 0, 0);
+
+      const mask = createCanvas(inputSize, inputSize);
+      const maskCtx = mask.getContext("2d");
+      maskCtx.imageSmoothingEnabled = false;
+      maskCtx.drawImage(maskSmall, 0, 0, inputSize, inputSize);
+      return mask;
+    }
+
+    async function runDetection() {
+      if (!state.image) return;
+      setBusy(true);
+      try {
+        state.maskCanvas = null;
+        state.detectionOutput = null;
+        state.maskOutput = null;
+        state.detections = [];
+        state.disabledLabels = new Set();
+        renderPreview();
+        const session = await ensureSession();
+        const tensor = prepareInputTensor();
+        log("推論開始");
+        const started = performance.now();
+        let outputs;
+        try {
+          outputs = await runModel(session, tensor);
+        } catch (error) {
+          if (state.provider === "webgpu") {
+            log(`WebGPU推論失敗: ${error.message}`);
+            log("WASMへ切り替えて再試行");
+            state.session = null;
+            state.forceWasm = true;
+            session = await ensureSession();
+            outputs = await runModel(session, tensor);
+          } else {
+            throw error;
+          }
+        }
+        const elapsed = Math.round(performance.now() - started);
+        const output0 = outputs.output0 || outputs[session.outputNames[0]];
+        const output1 = outputs.output1 || outputs[session.outputNames[1]];
+        if (!output0 || !output1) throw new Error("想定した segmentation 出力を取得できませんでした。");
+
+        state.detectionOutput = output0;
+        state.maskOutput = output1;
+        applyScoreThresholdFromCachedOutput();
+        log(`推論完了: ${elapsed}ms / 検出 ${state.detections.length} 件`);
+      } catch (error) {
+        console.error(error);
+        log(`エラー: ${error.message}`);
+        summary.innerHTML = `<span class="warning">${error.message}</span>`;
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function exportImage() {
+      rebuildActiveMask();
+      if (!state.image || !state.maskCanvas || getActiveDetections().length === 0) return;
+      const width = state.image.naturalWidth;
+      const height = state.image.naturalHeight;
+      const blockSize = Math.max(1, Math.round(Math.max(width, height) / 100));
+      const canvas = createCanvas(width, height);
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(state.image, 0, 0, width, height);
+      const mask = drawMaskToCanvas(null, width, height);
+      drawMosaic(ctx, width, height, blockSize, mask);
+      log(`書き出し: ${width}×${height}px / ブロック ${blockSize}px`);
+      canvas.toBlob((blob) => {
+        if (!blob) {
+          log("エラー: 画像を書き出せませんでした。");
+          return;
+        }
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${state.fileName}_ai_mosaic.png`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }, "image/png");
+    }
+
+    async function loadFile(file) {
+      if (!file) return;
+      if (!file.type.startsWith("image/")) {
+        log("画像ファイルを選択してください。");
+        return;
+      }
+      setBusy(true);
+      try {
+        state.image = await decodeImage(file);
+        state.fileName = sanitizeFileBase(file.name);
+        state.maskCanvas = null;
+        state.detectionOutput = null;
+        state.maskOutput = null;
+        state.detections = [];
+        state.disabledLabels = new Set();
+        summary.textContent = `${state.image.naturalWidth}×${state.image.naturalHeight}px / ${file.name}`;
+        logEl.textContent = "画像読込完了";
+        renderPreview();
+        setBusy(false);
+        await runDetection();
+      } catch (error) {
+        console.error(error);
+        log(`エラー: ${error.message}`);
+        setBusy(false);
+      }
+    }
+
+    fileInput.addEventListener("change", () => {
+      loadFile(fileInput.files[0]);
+    });
+
+    dropzone.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      dropzone.classList.add("is-over");
+    });
+
+    dropzone.addEventListener("dragleave", () => {
+      dropzone.classList.remove("is-over");
+    });
+
+    dropzone.addEventListener("drop", (event) => {
+      event.preventDefault();
+      dropzone.classList.remove("is-over");
+      loadFile(event.dataTransfer.files[0]);
+    });
+
+    runButton.addEventListener("click", runDetection);
+    exportButton.addEventListener("click", exportImage);
+
+    scoreRange.addEventListener("input", () => {
+      scoreLabel.textContent = Number(scoreRange.value).toFixed(2);
+      applyScoreThresholdFromCachedOutput();
+    });
+
+    maskRange.addEventListener("input", () => {
+      maskLabel.textContent = Number(maskRange.value).toFixed(2);
+      renderPreview();
+      setBusy(false);
+    });
+
+    renderBasePreview();
+    renderDetectionBadges();
+  </script>
+</body>
+</html>

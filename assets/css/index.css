@@ -76,6 +76,12 @@
   --brand-soft: rgba(53, 111, 85, 0.12);
 }
 
+.tool-card-ai-mosaic {
+  --brand: #2f7569;
+  --brand-deep: #1d5148;
+  --brand-soft: rgba(47, 117, 105, 0.12);
+}
+
 .tool-card-metadata {
   --brand: #5f686f;
   --brand-deep: #303942;

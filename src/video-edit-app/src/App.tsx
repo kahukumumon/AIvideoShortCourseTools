@@ -1491,6 +1491,7 @@ function App() {
           <a className="topbar-link" href="../ugoira/">うごイラ</a>
           <a className="topbar-link" href="../pixiv/">pixivリサイズ</a>
           <a className="topbar-link" href="../mosaic/">画像モザイク</a>
+          <a className="topbar-link" href="../ai_mosaic/">AI画像モザイク</a>
           <a className="topbar-link" href="../character/">オリキャラ設定</a>
         </nav>
       </div>

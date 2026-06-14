@@ -224,7 +224,7 @@ function appendLog(element, message) {
   if (!element) return;
   const prefix = element.textContent === "" ? "" : `${element.textContent}\n`;
   const next = `${prefix}[${formatTimestamp()}] ${message}`;
-  element.textContent = next.split("\n").slice(-160).join("\n");
+  element.textContent = next.split("\n").slice(-500).join("\n");
   element.scrollTop = element.scrollHeight;
 }
 
@@ -407,6 +407,236 @@ async function canvasToJpegBytes(canvas, quality = 0.92) {
     }, "image/jpeg", quality);
   });
   return new Uint8Array(await blob.arrayBuffer());
+}
+
+function createUgoiraFrameTimes(start, end, duration, fps) {
+  const frameTimes = [];
+  const cappedEnd = Math.min(end, duration);
+  for (let i = 0; ; i += 1) {
+    const time = start + i / fps;
+    if (time >= cappedEnd || time > duration) break;
+    frameTimes.push(time);
+  }
+  if (frameTimes.length === 0) frameTimes.push(start);
+  return frameTimes;
+}
+
+function isUgoiraWebCodecsCandidate(file) {
+  const type = String(file?.type || "").toLowerCase();
+  const name = String(file?.name || "").toLowerCase();
+  return type.includes("mp4") || /\.(mp4|m4v|mov)$/i.test(name);
+}
+
+function makeUgoiraDecoderDescription(sampleDescription) {
+  if (!sampleDescription || typeof sampleDescription !== "object") return undefined;
+  const codecBox = sampleDescription.avcC ?? sampleDescription.hvcC ?? sampleDescription.vpcC ?? sampleDescription.av1C;
+  if (!codecBox || typeof codecBox.write !== "function") return undefined;
+
+  const mp4box = webCodecsModules.mp4box;
+  const stream = new mp4box.DataStream(undefined, 0, mp4box.Endianness.BIG_ENDIAN);
+  codecBox.write(stream);
+  const boxed = new Uint8Array(stream.buffer);
+  if (boxed.byteLength <= 8) return undefined;
+  return boxed.slice(8);
+}
+
+async function writeUgoiraFramesFromVideoElement({ frameTimes, safeSize, signal, zip }) {
+  const extractor = document.createElement("video");
+  extractor.preload = "auto";
+  extractor.muted = true;
+  extractor.playsInline = true;
+  extractor.src = ugoiraState.objectUrl;
+  await waitForVideoReady(extractor);
+  throwIfAborted(signal);
+
+  const canvas = document.createElement("canvas");
+  canvas.width = safeSize.width;
+  canvas.height = safeSize.height;
+  const context = canvas.getContext("2d", { alpha: false });
+  if (!context) {
+    throw new Error("Canvas の初期化に失敗しました。");
+  }
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+
+  for (let i = 0; i < frameTimes.length; i += 1) {
+    throwIfAborted(signal);
+    const time = Math.min(frameTimes[i], Math.max(0, ugoiraState.metadata.duration - 0.001));
+    await seekVideo(extractor, time, signal);
+    await waitForPresentedVideoFrame(extractor, time, signal);
+    context.drawImage(extractor, 0, 0, safeSize.width, safeSize.height);
+    const jpgBytes = await canvasToJpegBytes(canvas, 0.92);
+    const frameName = `frame_${String(i + 1).padStart(5, "0")}.jpg`;
+    zip.file(frameName, jpgBytes, { binary: true });
+    appendLog(ugoiraEls.log, `フレーム ${i + 1}/${frameTimes.length}: ${frameName} @ ${time.toFixed(3)} 秒`);
+    setProgress(ugoiraEls.progress, (i + 1) / frameTimes.length);
+  }
+
+  extractor.removeAttribute("src");
+  extractor.load();
+  return frameTimes.length;
+}
+
+async function writeUgoiraFramesWithWebCodecs({ file, frameTimes, safeSize, signal, zip }) {
+  if (typeof VideoDecoder === "undefined" || typeof EncodedVideoChunk === "undefined") {
+    throw new Error("このブラウザは WebCodecs(VideoDecoder) に対応していません。");
+  }
+
+  await ensureWebCodecsModules();
+  const mp4box = webCodecsModules.mp4box;
+  const mp4file = mp4box.createFile();
+  const canvas = document.createElement("canvas");
+  canvas.width = safeSize.width;
+  canvas.height = safeSize.height;
+  const context = canvas.getContext("2d", { alpha: false });
+  if (!context) throw new Error("Canvas の初期化に失敗しました。");
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+
+  let videoTrack = null;
+  let decoder = null;
+  let decoderError = null;
+  let sampleChain = Promise.resolve();
+  let outputChain = Promise.resolve();
+  let nextFrameIndex = 0;
+  let completed = false;
+  const frameInterval = frameTimes.length > 1 ? Math.max(0.001, frameTimes[1] - frameTimes[0]) : 1;
+  const tolerance = Math.min(0.02, frameInterval / 2);
+
+  const configureDecoder = async (sample) => {
+    if (decoder) return;
+    const decoderConfig = {
+      codec: videoTrack.codec,
+      codedWidth: Math.max(1, Math.round(videoTrack.video?.width ?? videoTrack.track_width ?? 1)),
+      codedHeight: Math.max(1, Math.round(videoTrack.video?.height ?? videoTrack.track_height ?? 1)),
+    };
+    const description = makeUgoiraDecoderDescription(sample?.description);
+    if (description?.byteLength > 0) decoderConfig.description = description;
+    const support = await VideoDecoder.isConfigSupported(decoderConfig);
+    if (!support.supported) {
+      throw new Error(`この動画コーデックは WebCodecs デコードに対応していません: ${videoTrack.codec}`);
+    }
+    appendLog(
+      ugoiraEls.log,
+      `WebCodecs デコード: ${videoTrack.codec} / ${decoderConfig.codedWidth}×${decoderConfig.codedHeight} -> ${safeSize.width}×${safeSize.height}`
+    );
+
+    decoder = new VideoDecoder({
+      output: (frame) => {
+        outputChain = outputChain.then(async () => {
+          try {
+            throwIfAborted(signal);
+            const frameTime = Number(frame.timestamp) / 1_000_000;
+            if (nextFrameIndex < frameTimes.length && frameTime + tolerance >= frameTimes[nextFrameIndex]) {
+              context.drawImage(frame, 0, 0, safeSize.width, safeSize.height);
+              while (nextFrameIndex < frameTimes.length && frameTime + tolerance >= frameTimes[nextFrameIndex]) {
+                const jpgBytes = await canvasToJpegBytes(canvas, 0.92);
+                const frameName = `frame_${String(nextFrameIndex + 1).padStart(5, "0")}.jpg`;
+                zip.file(frameName, jpgBytes, { binary: true });
+                appendLog(ugoiraEls.log, `フレーム ${nextFrameIndex + 1}/${frameTimes.length}: ${frameName} @ ${frameTimes[nextFrameIndex].toFixed(3)} 秒`);
+                nextFrameIndex += 1;
+                setProgress(ugoiraEls.progress, nextFrameIndex / frameTimes.length);
+                if (nextFrameIndex >= frameTimes.length) {
+                  completed = true;
+                  break;
+                }
+              }
+            }
+          } finally {
+            frame.close();
+          }
+        });
+      },
+      error: (error) => {
+        decoderError = error instanceof Error ? error : new Error(String(error));
+      },
+    });
+    decoder.configure(support.config ?? decoderConfig);
+  };
+
+  const decodeSamples = async (samples) => {
+    for (const sample of samples) {
+      throwIfAborted(signal);
+      if (completed) return;
+      if (decoderError) throw decoderError;
+      if (!videoTrack) throw new Error("MP4 動画トラックが未初期化です。");
+      if (!sample.data || sample.data.byteLength === 0) continue;
+      await configureDecoder(sample);
+
+      const timestamp = Math.round((sample.cts / videoTrack.timescale) * 1_000_000);
+      const duration = Math.max(1, Math.round((Math.max(0, sample.duration || 0) / videoTrack.timescale) * 1_000_000));
+      decoder.decode(new EncodedVideoChunk({
+        type: sample.is_sync ? "key" : "delta",
+        timestamp,
+        duration,
+        data: sample.data,
+      }));
+
+      if (decoder.decodeQueueSize > 12) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      if (completed) return;
+    }
+  };
+
+  const readyPromise = new Promise((resolve, reject) => {
+    mp4file.onError = (error) => reject(error instanceof Error ? error : new Error(String(error)));
+    mp4file.onReady = async (info) => {
+      try {
+        videoTrack = info.videoTracks?.[0] ?? info.tracks?.find((track) => Boolean(track?.video)) ?? null;
+        if (!videoTrack) throw new Error("MP4 内に動画トラックが見つかりません。");
+        mp4file.setExtractionOptions(videoTrack.id, null, { nbSamples: 64 });
+        mp4file.start();
+        resolve();
+      } catch (error) {
+        reject(error);
+      }
+    };
+    mp4file.onSamples = (_id, _user, samples) => {
+      sampleChain = sampleChain.then(() => decodeSamples(samples));
+    };
+  });
+
+  try {
+    throwIfAborted(signal);
+    const buffer = await file.arrayBuffer();
+    buffer.fileStart = 0;
+    mp4file.appendBuffer(buffer);
+    await readyPromise;
+    mp4file.flush();
+    await sampleChain;
+    await outputChain;
+    if (!decoder) throw new Error("動画サンプルを取得できませんでした。");
+    if (!completed) {
+      if (decoderError) throw decoderError;
+      await decoder.flush();
+    }
+    await outputChain;
+    if (!completed && decoderError) throw decoderError;
+    if (nextFrameIndex === 0) throw new Error("指定範囲のフレームを取得できませんでした。");
+    if (nextFrameIndex < frameTimes.length) {
+      throw new Error(`指定範囲のフレームが不足しました: ${nextFrameIndex}/${frameTimes.length}`);
+    }
+    return nextFrameIndex;
+  } finally {
+    try {
+      decoder?.close();
+    } catch (_) {
+    }
+  }
+}
+
+async function writeUgoiraFrames({ file, frameTimes, safeSize, signal, zip }) {
+  if (isUgoiraWebCodecsCandidate(file)) {
+    try {
+      return await writeUgoiraFramesWithWebCodecs({ file, frameTimes, safeSize, signal, zip });
+    } catch (error) {
+      appendLog(ugoiraEls.log, `WebCodecs で取得できませんでした。video/canvas 経路へ切り替えます: ${error.message || error}`);
+    }
+  } else {
+    appendLog(ugoiraEls.log, "MP4 系以外の入力のため video/canvas 経路で取得します。");
+  }
+  return writeUgoiraFramesFromVideoElement({ frameTimes, safeSize, signal, zip });
 }
 
 function uniqueConcatLabel(name) {
@@ -681,6 +911,13 @@ function updateConcatTrimDisplay() {
   concatEls.trimFramesValue.textContent = `${frames} フレーム`;
 }
 
+function formatFfmpegCommandForLog(args) {
+  return args.map((arg) => {
+    const text = String(arg);
+    return /[\s;]/.test(text) ? `"${text.replace(/"/g, '\\"')}"` : text;
+  }).join(" ");
+}
+
 function buildTrimmedConcatCommand(inputPaths, metadataList, trimFrames, outputName) {
   const args = inputPaths.flatMap((inputPath) => ["-i", inputPath]);
   const filters = [];
@@ -694,16 +931,20 @@ function buildTrimmedConcatCommand(inputPaths, metadataList, trimFrames, outputN
     const trimSeconds = trimFrames / fps;
     const startTrim = i === 0 ? 0 : trimSeconds;
     const endTrim = i === inputPaths.length - 1 ? 0 : trimSeconds;
-    const startFrames = i === 0 ? 0 : trimFrames;
-    const endFrames = i === inputPaths.length - 1 ? 0 : trimFrames;
     const duration = Number(metadata.duration) || 0;
     const trimmedDuration = duration > 0 ? Math.max(0.001, duration - startTrim - endTrim) : 0;
     const vLabel = `cv${i}`;
     const aLabel = `ca${i}`;
     const videoFilters = [];
 
-    if (startFrames > 0) videoFilters.push(`trim=start_frame=${startFrames}`);
-    if (endFrames > 0) videoFilters.push("reverse", `trim=start_frame=${endFrames}`, "reverse");
+    if (startTrim > 0 || (duration > 0 && endTrim > 0)) {
+      const trimOptions = [];
+      if (startTrim > 0) trimOptions.push(`start=${startTrim.toFixed(6)}`);
+      if (duration > 0 && endTrim > 0) {
+        trimOptions.push(`end=${Math.max(startTrim + 0.001, duration - endTrim).toFixed(6)}`);
+      }
+      videoFilters.push(`trim=${trimOptions.join(":")}`);
+    }
     videoFilters.push("setpts=PTS-STARTPTS", "format=yuv420p");
     filters.push(`[${i}:v]${videoFilters.join(",")}[${vLabel}]`);
     videoLabels.push(`[${vLabel}]`);
@@ -711,8 +952,14 @@ function buildTrimmedConcatCommand(inputPaths, metadataList, trimFrames, outputN
 
     if (metadata.hasAudio) {
       const audioFilters = [];
-      if (startTrim > 0) audioFilters.push(`atrim=start=${startTrim.toFixed(6)}`);
-      if (endTrim > 0) audioFilters.push("areverse", `atrim=start=${endTrim.toFixed(6)}`, "areverse");
+      if (startTrim > 0 || (duration > 0 && endTrim > 0)) {
+        const atrimOptions = [];
+        if (startTrim > 0) atrimOptions.push(`start=${startTrim.toFixed(6)}`);
+        if (duration > 0 && endTrim > 0) {
+          atrimOptions.push(`end=${Math.max(startTrim + 0.001, duration - endTrim).toFixed(6)}`);
+        }
+        audioFilters.push(`atrim=${atrimOptions.join(":")}`);
+      }
       audioFilters.push("asetpts=PTS-STARTPTS", "aformat=sample_rates=48000:channel_layouts=stereo");
       filters.push(`[${i}:a]${audioFilters.join(",")}[${aLabel}]`);
     } else {
@@ -3820,7 +4067,15 @@ function initConcatTool() {
             ];
           }
 
-          const exitCode = await ffmpeg.exec(ffmpegArgs);
+          appendLog(concatEls.log, `ffmpeg コマンド: ${formatFfmpegCommandForLog(ffmpegArgs)}`);
+          let exitCode;
+          try {
+            exitCode = await ffmpeg.exec(ffmpegArgs);
+          } catch (execError) {
+            appendLog(concatEls.log, `ffmpeg コマンド再掲: ${formatFfmpegCommandForLog(ffmpegArgs)}`);
+            throw execError;
+          }
+          appendLog(concatEls.log, `ffmpeg コマンド再掲: ${formatFfmpegCommandForLog(ffmpegArgs)}`);
           if (exitCode !== 0) {
             throw new Error("ffmpeg が 0 以外の終了コードを返しました。素材条件が揃っているか確認してください。");
           }
@@ -3988,47 +4243,17 @@ function initUgoiraTool() {
         }
         appendLog(ugoiraEls.log, `うごイラ変換: ${safeSize.width}×${safeSize.height} / ${start.toFixed(3)} 秒 → ${Math.min(end, ugoiraState.metadata.duration).toFixed(3)} 秒 / 想定 ${expectedFrames} 枚`);
 
-        const extractor = document.createElement("video");
-        extractor.preload = "auto";
-        extractor.muted = true;
-        extractor.playsInline = true;
-        extractor.src = ugoiraState.objectUrl;
-        await waitForVideoReady(extractor);
-        throwIfAborted(signal);
-
-        const canvas = document.createElement("canvas");
-        canvas.width = safeSize.width;
-        canvas.height = safeSize.height;
-        const context = canvas.getContext("2d", { alpha: false });
-        if (!context) {
-          throw new Error("Canvas の初期化に失敗しました。");
-        }
-        context.imageSmoothingEnabled = true;
-        context.imageSmoothingQuality = "high";
-
         const zip = new JSZip();
-        const frameTimes = [];
-        for (let i = 0; ; i += 1) {
-          const time = start + i / fps;
-          if (time >= end || time > ugoiraState.metadata.duration) break;
-          frameTimes.push(time);
-        }
-        if (frameTimes.length === 0) frameTimes.push(start);
+        const frameTimes = createUgoiraFrameTimes(start, end, ugoiraState.metadata.duration, fps);
+        const writtenFrames = await writeUgoiraFrames({
+          file: ugoiraState.file,
+          frameTimes,
+          safeSize,
+          signal,
+          zip,
+        });
 
-        for (let i = 0; i < frameTimes.length; i += 1) {
-          throwIfAborted(signal);
-          const time = Math.min(frameTimes[i], Math.max(0, ugoiraState.metadata.duration - 0.001));
-          await seekVideo(extractor, time, signal);
-          await waitForPresentedVideoFrame(extractor, time, signal);
-          context.drawImage(extractor, 0, 0, safeSize.width, safeSize.height);
-          const jpgBytes = await canvasToJpegBytes(canvas, 0.92);
-          const frameName = `frame_${String(i + 1).padStart(5, "0")}.jpg`;
-          zip.file(frameName, jpgBytes, { binary: true });
-          appendLog(ugoiraEls.log, `フレーム ${i + 1}/${frameTimes.length}: ${frameName} @ ${time.toFixed(3)} 秒`);
-          setProgress(ugoiraEls.progress, (i + 1) / frameTimes.length);
-        }
-
-        appendLog(ugoiraEls.log, `${frameTimes.length} 枚の JPG を zip にまとめます。`);
+        appendLog(ugoiraEls.log, `${writtenFrames} 枚の JPG を zip にまとめます。`);
         const zipBlob = await zip.generateAsync({
           type: "blob",
           compression: "STORE",
@@ -4037,7 +4262,7 @@ function initUgoiraTool() {
         const outputName = `${sanitizeBaseName(ugoiraState.file.name)}-${fps}fps.zip`;
         appendLog(ugoiraEls.log, `zip 出力サイズ: ${formatBytes(zipBlob.size)}`);
         downloadBlob(zipBlob, outputName, ugoiraEls.log);
-        setStatus(ugoiraEls.status, `${frameTimes.length} 枚を書き出し、${outputName} をダウンロードしました。`, "success");
+        setStatus(ugoiraEls.status, `${writtenFrames} 枚を書き出し、${outputName} をダウンロードしました。`, "success");
         appendLog(ugoiraEls.log, `zip 出力完了: ${outputName}`);
       });
     } catch (error) {
