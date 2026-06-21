@@ -12,6 +12,7 @@ import type {
   MosaicTrack,
   VideoClip,
 } from './types';
+import ToolNav from './components/ToolNav';
 import { loadAudioSource, loadVideoSource } from './lib/media';
 import { exportTimelineToMp4 } from './lib/exportFfmpeg';
 import { computeRmsGraph } from './lib/rms';
@@ -1486,14 +1487,7 @@ function App() {
     <main className="video-edit-page" onClick={() => setContextMenu(null)}>
       <div className="topbar">
         <a className="topbar-link" href="../..">トップへ戻る</a>
-        <nav className="topbar-nav" aria-label="ツール移動">
-          <a className="topbar-link" href="../concat/">動画連結</a>
-          <a className="topbar-link" href="../ugoira/">うごイラ</a>
-          <a className="topbar-link" href="../pixiv/">pixivリサイズ</a>
-          <a className="topbar-link" href="../mosaic/">画像モザイク</a>
-          <a className="topbar-link" href="../ai_mosaic/">AI画像モザイク</a>
-          <a className="topbar-link" href="../character/">オリキャラ設定</a>
-        </nav>
+        <ToolNav currentTool="video_edit" />
       </div>
 
       <section className="panel editor-shell">

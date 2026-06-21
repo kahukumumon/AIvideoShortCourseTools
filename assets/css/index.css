@@ -106,6 +106,12 @@
   --brand-soft: rgba(62, 111, 140, 0.12);
 }
 
+.tool-card-local-video-viewer {
+  --brand: #2b7c70;
+  --brand-deep: #15564e;
+  --brand-soft: rgba(43, 124, 112, 0.12);
+}
+
 .tool-card-color-match {
   --brand: #2f7569;
   --brand-deep: #1d5148;

@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ローカル動画ビューアー</title>
+  <link rel="icon" href="data:,">
+  <style>
+    :root {
+      --bg: #f6f0e8;
+      --panel: #fffaf3;
+      --panel-strong: #ffffff;
+      --ink: #1f2428;
+      --muted: #65717a;
+      --line: rgba(45, 56, 64, 0.16);
+      --brand: #2b7c70;
+      --brand-dark: #15564e;
+      --brand-soft: rgba(43, 124, 112, 0.12);
+      --danger: #9a4628;
+      --shadow: 0 18px 42px rgba(46, 38, 28, 0.12);
+      --mono: "Cascadia Code", Consolas, monospace;
+      --sans: "Hiragino Sans", "Yu Gothic UI", system-ui, sans-serif;
+      color-scheme: light;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: var(--sans);
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 8% 0%, rgba(43, 124, 112, 0.14), transparent 28%),
+        linear-gradient(180deg, #fbf6ee 0%, var(--bg) 100%);
+    }
+
+    button,
+    input {
+      font: inherit;
+    }
+
+    button {
+      min-height: 42px;
+      border: 0;
+      border-radius: 12px;
+      padding: 10px 14px;
+      cursor: pointer;
+      color: var(--ink);
+      background: rgba(34, 42, 48, 0.08);
+      transition: transform 160ms ease, opacity 160ms ease, background-color 160ms ease;
+    }
+
+    button:hover:not(:disabled) {
+      transform: translateY(-1px);
+      background: rgba(34, 42, 48, 0.12);
+    }
+
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.44;
+    }
+
+    .primary {
+      color: #fff;
+      background: var(--brand);
+    }
+
+    .primary:hover:not(:disabled) {
+      background: var(--brand-dark);
+    }
+
+    .page {
+      width: min(1120px, calc(100vw - 28px));
+      margin: 0 auto;
+      padding: 24px 0 48px;
+    }
+
+    .topbar {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+
+    .topbar-nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+
+    .topbar-link {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 10px 16px;
+      color: var(--ink);
+      background: rgba(255, 255, 255, 0.72);
+      text-decoration: none;
+      transition: background-color 160ms ease, transform 160ms ease;
+    }
+
+    .topbar-link:hover {
+      background: rgba(48, 116, 104, 0.12);
+      transform: translateY(-1px);
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: rgba(255, 250, 243, 0.9);
+      box-shadow: var(--shadow);
+    }
+
+    .header {
+      padding: 22px;
+    }
+
+    .header h1 {
+      margin: 0;
+      font-size: clamp(1.7rem, 3vw, 2.6rem);
+      letter-spacing: 0;
+    }
+
+    .header p {
+      margin: 10px 0 0;
+      color: var(--muted);
+      line-height: 1.7;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 320px;
+      gap: 16px;
+      margin-top: 16px;
+    }
+
+    .viewer {
+      overflow: hidden;
+      background: #111416;
+    }
+
+    .video-empty,
+    video {
+      width: 100%;
+      aspect-ratio: 16 / 9;
+    }
+
+    .video-empty {
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      color: #dce3e6;
+      text-align: center;
+      background:
+        linear-gradient(135deg, rgba(255, 255, 255, 0.08), transparent),
+        #111416;
+    }
+
+    video {
+      display: block;
+      max-height: min(72vh, 680px);
+      background: #000;
+    }
+
+    .controls,
+    .side {
+      padding: 18px;
+    }
+
+    .button-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .progress-row {
+      display: grid;
+      gap: 10px;
+      margin: 16px 0;
+    }
+
+    .progress-shell {
+      position: relative;
+      height: 18px;
+      border-radius: 999px;
+      background: rgba(34, 42, 48, 0.12);
+      cursor: pointer;
+      touch-action: none;
+      overflow: hidden;
+    }
+
+    .progress-fill {
+      width: 0%;
+      height: 100%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, #2b7c70, #4f9b6a);
+    }
+
+    .progress-knob {
+      position: absolute;
+      top: 50%;
+      left: 0%;
+      width: 16px;
+      height: 16px;
+      border: 2px solid #fff;
+      border-radius: 50%;
+      background: var(--brand-dark);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+    }
+
+    .time-grid,
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .stat {
+      min-height: 74px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--panel-strong);
+    }
+
+    .label {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--muted);
+      font-size: 0.84rem;
+    }
+
+    .value {
+      font-family: var(--mono);
+      font-size: 1.12rem;
+      font-variant-numeric: tabular-nums;
+      word-break: break-word;
+    }
+
+    .side {
+      display: grid;
+      align-content: start;
+      gap: 16px;
+    }
+
+    .file-box {
+      position: relative;
+      display: grid;
+      gap: 10px;
+      padding: 16px;
+      border: 1.5px dashed rgba(43, 124, 112, 0.34);
+      border-radius: 16px;
+      background: var(--brand-soft);
+    }
+
+    .file-box.dragging {
+      border-color: var(--brand);
+      background: rgba(43, 124, 112, 0.2);
+    }
+
+    .file-box input[type="file"] {
+      width: 100%;
+    }
+
+    .field {
+      display: grid;
+      gap: 8px;
+    }
+
+    .field input[type="number"] {
+      width: 100%;
+      min-height: 42px;
+      padding: 9px 12px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      color: var(--ink);
+      background: #fff;
+    }
+
+    .file-name,
+    .note {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.92rem;
+      line-height: 1.6;
+      word-break: break-word;
+    }
+
+    .error {
+      color: var(--danger);
+    }
+
+    @media (max-width: 900px) {
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      .time-grid,
+      .stats {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <div class="topbar">
+      <a class="topbar-link" href="../../">← ツール一覧</a>
+      <nav class="topbar-nav" aria-label="ツール移動" data-tool-nav></nav>
+    </div>
+
+    <section class="panel header">
+      <h1>ローカル動画ビューアー</h1>
+      <p>動画ファイルをブラウザだけで読み込み、0.1秒単位の時刻表示とFPSベースのフレーム送りで確認できます。</p>
+    </section>
+
+    <div class="layout">
+      <section class="panel viewer" aria-label="動画プレビュー">
+        <div id="emptyState" class="video-empty">動画ファイルを選択してください</div>
+        <video id="video" hidden playsinline></video>
+
+        <div class="controls">
+          <div class="button-row">
+            <button id="playPause" class="primary" type="button" disabled>再生</button>
+            <button id="seekBack" type="button" disabled>-0.1秒</button>
+            <button id="seekForward" type="button" disabled>+0.1秒</button>
+            <button id="frameBack" type="button" disabled>1フレーム戻る</button>
+            <button id="frameForward" type="button" disabled>1フレーム進む</button>
+          </div>
+
+          <div class="progress-row">
+            <div id="progress" class="progress-shell" role="slider" aria-label="動画の再生位置" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" tabindex="0">
+              <div id="progressFill" class="progress-fill"></div>
+              <div id="progressKnob" class="progress-knob"></div>
+            </div>
+            <div class="time-grid">
+              <div class="stat">
+                <span class="label">現在時間</span>
+                <span id="currentTime" class="value">00:00.000</span>
+              </div>
+              <div class="stat">
+                <span class="label">総時間</span>
+                <span id="duration" class="value">00:00.000</span>
+              </div>
+              <div class="stat">
+                <span class="label">進捗</span>
+                <span id="progressText" class="value">0.0%</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <aside class="panel side" aria-label="設定">
+        <label id="dropZone" class="file-box">
+          <span class="label">動画ファイル</span>
+          <input id="fileInput" type="file" accept="video/*">
+          <span class="note">クリックして選択、またはここに動画をドロップ</span>
+          <span id="fileName" class="file-name">未選択</span>
+        </label>
+
+        <label class="field">
+          <span class="label">FPS</span>
+          <input id="fpsInput" type="number" min="1" step="0.01" value="30" inputmode="decimal">
+        </label>
+
+        <div class="stats">
+          <div class="stat">
+            <span class="label">推定フレーム番号</span>
+            <span id="frameNumber" class="value">0</span>
+          </div>
+          <div class="stat">
+            <span class="label">1フレーム秒数</span>
+            <span id="frameStep" class="value">0.0333 秒</span>
+          </div>
+          <div class="stat">
+            <span class="label">状態</span>
+            <span id="status" class="value">待機中</span>
+          </div>
+        </div>
+
+        <p id="message" class="note">timeupdateイベントには依存せず、requestAnimationFrameで表示を更新します。</p>
+      </aside>
+    </div>
+  </main>
+
+  <script>
+    const video = document.getElementById("video");
+    const emptyState = document.getElementById("emptyState");
+    const dropZone = document.getElementById("dropZone");
+    const fileInput = document.getElementById("fileInput");
+    const fileName = document.getElementById("fileName");
+    const playPause = document.getElementById("playPause");
+    const seekBack = document.getElementById("seekBack");
+    const seekForward = document.getElementById("seekForward");
+    const frameBack = document.getElementById("frameBack");
+    const frameForward = document.getElementById("frameForward");
+    const progress = document.getElementById("progress");
+    const progressFill = document.getElementById("progressFill");
+    const progressKnob = document.getElementById("progressKnob");
+    const currentTimeLabel = document.getElementById("currentTime");
+    const durationLabel = document.getElementById("duration");
+    const progressText = document.getElementById("progressText");
+    const fpsInput = document.getElementById("fpsInput");
+    const frameNumber = document.getElementById("frameNumber");
+    const frameStep = document.getElementById("frameStep");
+    const statusLabel = document.getElementById("status");
+    const message = document.getElementById("message");
+
+    let objectUrl = "";
+    let isDraggingProgress = false;
+
+    const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+    const hasVideo = () => Number.isFinite(video.duration) && video.duration > 0;
+    const getFps = () => Math.max(Number.parseFloat(fpsInput.value) || 1, 1);
+    const getFrameStep = () => 1 / getFps();
+
+    function formatSeconds(value, digits = 1) {
+      const seconds = Number.isFinite(value) ? value : 0;
+      return `${seconds.toFixed(digits)} 秒`;
+    }
+
+    function formatTimestamp(value) {
+      const totalMilliseconds = Math.max(Math.round((Number.isFinite(value) ? value : 0) * 1000), 0);
+      const minutes = Math.floor(totalMilliseconds / 60000);
+      const seconds = Math.floor((totalMilliseconds % 60000) / 1000);
+      const milliseconds = totalMilliseconds % 1000;
+      return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(milliseconds).padStart(3, "0")}`;
+    }
+
+    function setControlsEnabled(enabled) {
+      [playPause, seekBack, seekForward, frameBack, frameForward].forEach((button) => {
+        button.disabled = !enabled;
+      });
+    }
+
+    // currentTimeは小数秒のまま扱い、0.1秒や1/FPS秒で正確にシークします。
+    function seekBy(deltaSeconds) {
+      if (!hasVideo()) return;
+      video.currentTime = clamp(video.currentTime + deltaSeconds, 0, video.duration);
+    }
+
+    function seekToRatio(ratio) {
+      if (!hasVideo()) return;
+      video.currentTime = clamp(ratio, 0, 1) * video.duration;
+    }
+
+    function seekFromPointer(event) {
+      const rect = progress.getBoundingClientRect();
+      const ratio = (event.clientX - rect.left) / rect.width;
+      seekToRatio(ratio);
+    }
+
+    function setStatus() {
+      if (!hasVideo()) {
+        statusLabel.textContent = "待機中";
+        return;
+      }
+      statusLabel.textContent = video.paused ? "一時停止" : "再生中";
+    }
+
+    // requestAnimationFrameで常時UIを更新し、timeupdateの発火間隔に依存しません。
+    function renderLoop() {
+      const duration = hasVideo() ? video.duration : 0;
+      const current = hasVideo() ? video.currentTime : 0;
+      const ratio = duration > 0 ? clamp(current / duration, 0, 1) : 0;
+      const percent = ratio * 100;
+      const fps = getFps();
+
+      currentTimeLabel.textContent = formatTimestamp(current);
+      durationLabel.textContent = formatTimestamp(duration);
+      progressText.textContent = `${percent.toFixed(1)}%`;
+      progressFill.style.width = `${percent}%`;
+      progressKnob.style.left = `${percent}%`;
+      progress.setAttribute("aria-valuemax", duration.toFixed(1));
+      progress.setAttribute("aria-valuenow", current.toFixed(1));
+      frameNumber.textContent = String(Math.floor(current * fps));
+      frameStep.textContent = formatSeconds(1 / fps, 4);
+      playPause.textContent = video.paused ? "再生" : "一時停止";
+      setStatus();
+
+      requestAnimationFrame(renderLoop);
+    }
+
+    function loadVideoFile(file) {
+      if (!file) return;
+      if (!file.type.startsWith("video/")) {
+        message.textContent = "動画ファイルをドロップしてください。";
+        message.classList.add("error");
+        return;
+      }
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      objectUrl = URL.createObjectURL(file);
+
+      video.src = objectUrl;
+      video.hidden = false;
+      emptyState.hidden = true;
+      fileName.textContent = file.name;
+      message.textContent = "メタデータを読み込み中です。";
+      message.classList.remove("error");
+      setControlsEnabled(false);
+    }
+
+    fileInput.addEventListener("change", () => {
+      loadVideoFile(fileInput.files && fileInput.files[0]);
+    });
+
+    // 動画ファイルをドロップしても、ファイル選択と同じ処理で読み込みます。
+    dropZone.addEventListener("dragover", (event) => {
+      event.preventDefault();
+      dropZone.classList.add("dragging");
+    });
+
+    dropZone.addEventListener("dragleave", () => {
+      dropZone.classList.remove("dragging");
+    });
+
+    dropZone.addEventListener("drop", (event) => {
+      event.preventDefault();
+      dropZone.classList.remove("dragging");
+      loadVideoFile(event.dataTransfer.files && event.dataTransfer.files[0]);
+    });
+
+    video.addEventListener("loadedmetadata", () => {
+      video.currentTime = 0;
+      setControlsEnabled(true);
+      message.textContent = "動画を読み込みました。進捗バーはクリックまたはドラッグでシークできます。";
+    });
+
+    video.addEventListener("error", () => {
+      setControlsEnabled(false);
+      message.textContent = "この動画はブラウザで再生できません。別の形式を試してください。";
+      message.classList.add("error");
+    });
+
+    playPause.addEventListener("click", async () => {
+      if (!hasVideo()) return;
+      if (video.paused) {
+        try {
+          await video.play();
+          message.textContent = "再生中です。";
+          message.classList.remove("error");
+        } catch (error) {
+          message.textContent = "ブラウザが再生を開始できませんでした。動画形式やファイル状態を確認してください。";
+          message.classList.add("error");
+        }
+      } else {
+        video.pause();
+      }
+    });
+
+    seekBack.addEventListener("click", () => seekBy(-0.1));
+    seekForward.addEventListener("click", () => seekBy(0.1));
+    frameBack.addEventListener("click", () => seekBy(-getFrameStep()));
+    frameForward.addEventListener("click", () => seekBy(getFrameStep()));
+
+    progress.addEventListener("pointerdown", (event) => {
+      isDraggingProgress = true;
+      progress.setPointerCapture(event.pointerId);
+      seekFromPointer(event);
+    });
+
+    progress.addEventListener("pointermove", (event) => {
+      if (isDraggingProgress) seekFromPointer(event);
+    });
+
+    progress.addEventListener("pointerup", (event) => {
+      isDraggingProgress = false;
+      progress.releasePointerCapture(event.pointerId);
+    });
+
+    progress.addEventListener("pointercancel", () => {
+      isDraggingProgress = false;
+    });
+
+    progress.addEventListener("keydown", (event) => {
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        seekBy(-0.1);
+      }
+      if (event.key === "ArrowRight") {
+        event.preventDefault();
+        seekBy(0.1);
+      }
+    });
+
+    fpsInput.addEventListener("input", () => {
+      if (Number.parseFloat(fpsInput.value) < 1) {
+        fpsInput.value = "1";
+      }
+    });
+
+    renderLoop();
+  </script>
+  <script src="../../assets/js/tool-nav.js"></script>
+</body>
+</html>

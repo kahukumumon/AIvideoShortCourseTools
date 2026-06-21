@@ -1,0 +1,14 @@
+[
+  { "id": "video_edit", "label": "動画編集" },
+  { "id": "concat", "label": "動画連結" },
+  { "id": "audio_mux", "label": "音声合成" },
+  { "id": "video_mosaic", "label": "動画固定モザイク" },
+  { "id": "local_video_viewer", "label": "ローカル動画ビューアー" },
+  { "id": "color_match", "label": "色合わせ" },
+  { "id": "ugoira", "label": "うごイラ" },
+  { "id": "pixiv", "label": "pixivリサイズ" },
+  { "id": "mosaic", "label": "画像モザイク" },
+  { "id": "ai_mosaic", "label": "AI画像モザイク" },
+  { "id": "metadata", "label": "メタデータ削除" },
+  { "id": "character", "label": "オリキャラ設定" }
+]
